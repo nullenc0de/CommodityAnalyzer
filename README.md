@@ -1,3 +1,4 @@
+```
 === Commodity Analysis Tool ===
 1. Analyze a specific symbol
 2. Analyze all predefined commodities
@@ -140,3 +141,4 @@ Further Steps:
 2. Look at longer-term trends and overall market conditions.
 3. Consider consulting with a financial advisor for personalized advice.
 4. Keep learning about different investment strategies and risk management techniques.
+```
