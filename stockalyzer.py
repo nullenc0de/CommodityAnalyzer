@@ -184,6 +184,7 @@ def analyze_commodity(symbol, data, capital, risk_per_trade):
         latest_features = X.iloc[-1:]
         predictions = {}
         confidences = {}
+        price_targets = {}
 
         for horizon in ['1d', '5d', '20d']:
             latest_imputed = imputers[horizon].transform(latest_features)
@@ -195,12 +196,29 @@ def analyze_commodity(symbol, data, capital, risk_per_trade):
             raw_confidence = abs(prob - 0.5) * 2
             adjusted_confidence = 1 / (1 + np.exp(-10 * (raw_confidence - 0.5)))
 
-            if adjusted_confidence > 0.6:
+            if adjusted_confidence > 0.2:  # Lowered threshold
                 predictions[horizon] = "BUY" if prob > 0.5 else "SELL"
             else:
                 predictions[horizon] = "HOLD"
 
             confidences[horizon] = adjusted_confidence
+
+            # Calculate price targets
+            current_price = data['Close'].iloc[-1]
+            volatility = data['Volatility'].iloc[-1]
+
+            if predictions[horizon] == "BUY":
+                entry_price = current_price
+                exit_price = current_price * (1 + (adjusted_confidence * 0.1))
+                stop_loss = current_price * (1 - (volatility * 2))
+            elif predictions[horizon] == "SELL":
+                entry_price = current_price
+                exit_price = current_price * (1 - (adjusted_confidence * 0.1))
+                stop_loss = current_price * (1 + (volatility * 2))
+            else:
+                entry_price = exit_price = stop_loss = None
+
+            price_targets[horizon] = {"entry": entry_price, "exit": exit_price, "stop_loss": stop_loss}
 
         current_price = data['Close'].iloc[-1]
         contract_spec = FUTURES_SPECS.get(symbol, {"name": symbol})
@@ -220,11 +238,11 @@ def analyze_commodity(symbol, data, capital, risk_per_trade):
         rf_model = models['1d'].estimators_[0]  # Assuming RandomForest is the first estimator
         plot_feature_importance(rf_model, X.columns, "Feature Importance - 1d Horizon (RandomForest)")
 
-        return predictions, confidences, scores
+        return predictions, confidences, scores, price_targets
     except Exception as e:
         print(f"Analysis failed for {symbol}: {str(e)}")
         traceback.print_exc()
-        return {"1d": "HOLD", "5d": "HOLD", "20d": "HOLD"}, {"1d": 0, "5d": 0, "20d": 0}, {}
+        return {"1d": "HOLD", "5d": "HOLD", "20d": "HOLD"}, {"1d": 0, "5d": 0, "20d": 0}, {}, {}
 
 def plot_feature_importance(model, feature_names, title):
     if hasattr(model, 'feature_importances_'):
@@ -240,7 +258,7 @@ def plot_feature_importance(model, feature_names, title):
     else:
         print("Model doesn't have feature_importances_ attribute. Skipping feature importance plot.")
 
-def provide_beginner_summary(symbol, predictions, confidences, current_price, scores):
+def provide_beginner_summary(symbol, predictions, confidences, current_price, scores, price_targets):
     print("\n=== Investment Opportunity Summary ===")
     print(f"Analysis for {symbol}:")
     print(f"Current Price: ${current_price:.2f}")
@@ -249,15 +267,21 @@ def provide_beginner_summary(symbol, predictions, confidences, current_price, sc
         print(f"\n{horizon} Outlook:")
         print(f"Model suggestion: {predictions[horizon]}")
         print(f"Confidence: {confidences[horizon]:.2f}")
-        if horizon in scores:
-            print(f"Average Model F1 Score: {np.mean(list(scores[horizon].values())):.2f}")
-        else:
-            print("Model performance data not available.")
+        print(f"Average Model F1 Score: {np.mean(list(scores[horizon].values())):.2f}")
 
-        if predictions[horizon] == "BUY" and confidences[horizon] > 0.6:
+        if predictions[horizon] != "HOLD":
+            print(f"Suggested entry price: ${price_targets[horizon]['entry']:.2f}")
+            print(f"Suggested exit price: ${price_targets[horizon]['exit']:.2f}")
+            print(f"Suggested stop loss: ${price_targets[horizon]['stop_loss']:.2f}")
+
+        if predictions[horizon] == "BUY" and confidences[horizon] > 0.2:
             print(f"Potential opportunity: Consider buying for a {horizon} hold.")
-        elif predictions[horizon] == "SELL" and confidences[horizon] > 0.6:
+            print(f"Potential profit: ${price_targets[horizon]['exit'] - price_targets[horizon]['entry']:.2f}")
+            print(f"Potential loss: ${price_targets[horizon]['entry'] - price_targets[horizon]['stop_loss']:.2f}")
+        elif predictions[horizon] == "SELL" and confidences[horizon] > 0.2:
             print(f"Potential opportunity: Consider selling if you own this asset.")
+            print(f"Potential profit: ${price_targets[horizon]['entry'] - price_targets[horizon]['exit']:.2f}")
+            print(f"Potential loss: ${price_targets[horizon]['stop_loss'] - price_targets[horizon]['entry']:.2f}")
         else:
             print("No clear opportunity identified.")
 
@@ -266,13 +290,13 @@ def provide_beginner_summary(symbol, predictions, confidences, current_price, sc
     print("Always conduct your own research and consider seeking professional financial advice before trading.")
     print("Remember that all investments carry risk, including the potential loss of principal.")
 
-
     print("\nWhat does this mean?")
     print("- A 'BUY' suggestion means the model thinks the price might go up.")
     print("- A 'SELL' suggestion means the model thinks the price might go down.")
     print("- A 'HOLD' suggestion means the model is not confident enough to suggest a buy or sell.")
     print("- Confidence ranges from 0 to 1. Higher numbers mean the model is more sure.")
     print("- F1 Score is a measure of the model's accuracy. It ranges from 0 to 1, where 1 is perfect.")
+    print("- The suggested entry, exit, and stop loss prices are based on the current price, model confidence, and recent volatility.")
 
     print("\nRisk Management Suggestions:")
     print("1. Don't make decisions based solely on this model. It's just one tool.")
@@ -299,11 +323,11 @@ def analyze_user_symbol(symbol, capital=100000, risk_per_trade=1):
             print(f"No data available for {symbol}. Please check the ticker symbol and try again.")
             return
 
-        predictions, confidences, scores = analyze_commodity(symbol, data, capital, risk_per_trade)
+        predictions, confidences, scores, price_targets = analyze_commodity(symbol, data, capital, risk_per_trade)
 
         current_price = data['Close'].iloc[-1]
 
-        provide_beginner_summary(symbol, predictions, confidences, current_price, scores)
+        provide_beginner_summary(symbol, predictions, confidences, current_price, scores, price_targets)
 
     except Exception as e:
         print(f"An error occurred while analyzing {symbol}: {str(e)}")
