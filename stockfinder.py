@@ -20,11 +20,13 @@ class StockMonitor:
         self.symbols = []
         self.session = None
         self.error_count = {}
-        self.discord_webhook = os.getenv('DISCORD_WEBHOOK')
+        self.discord_webhook = os.getenv('https://discord.com/api/webhooks/blah')
         self.slack_webhook = os.getenv('SLACK_WEBHOOK')
         self.high_potential_stocks = []
         self.processed_count = 0
         self.total_symbols = 0
+        self.monitor_interval = 3600  # Default to 1 hour
+        self.is_monitoring = False
 
     async def get_stock_symbols(self):
         url = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
@@ -311,9 +313,20 @@ Profit: ${profit:.2f} ({profit_percentage:.2f}%)
             async with aiohttp.ClientSession() as session:
                 await session.post(self.slack_webhook, json={"text": message})
 
+    async def continuous_monitor(self):
+        self.is_monitoring = True
+        while self.is_monitoring:
+            print("Starting a new monitoring cycle...")
+            await self.process_stocks()
+            print(f"Monitoring cycle complete. Waiting for {self.monitor_interval} seconds before next cycle.")
+            await asyncio.sleep(self.monitor_interval)
+
     async def process_stocks(self):
         self.session = aiohttp.ClientSession()
         self.symbols = await self.get_stock_symbols()
+        self.processed_count = 0
+        self.high_potential_stocks = []
+
         for symbol in self.symbols:
             try:
                 self.processed_count += 1
@@ -356,14 +369,29 @@ Profit: ${profit:.2f} ({profit_percentage:.2f}%)
         print(f"Processing complete. Analyzed {self.processed_count} stocks.")
         print(f"Found {len(self.high_potential_stocks)} high potential stocks.")
 
-    async def start(self):
+        if not self.high_potential_stocks and not self.is_monitoring:
+            print("No high potential stocks found. Starting continuous monitoring...")
+            await self.continuous_monitor()
+
+    async def start(self, mode='once'):
         start_time = time.time()
-        await self.process_stocks()
+        if mode == 'monitor':
+            await self.continuous_monitor()
+        else:
+            await self.process_stocks()
         end_time = time.time()
         execution_time = end_time - start_time
         print(f"Total execution time: {execution_time:.2f} seconds")
 
+    def stop_monitoring(self):
+        self.is_monitoring = False
+        print("Stopping monitoring mode after the current cycle completes.")
+
 # Main execution block
 if __name__ == "__main__":
     stock_monitor = StockMonitor()
-    asyncio.run(stock_monitor.start())
+
+    # You can change this to 'monitor' to start in continuous monitoring mode
+    mode = 'once'
+
+    asyncio.run(stock_monitor.start(mode))
