@@ -9,6 +9,10 @@ import os
 import csv
 from io import StringIO
 import random
+import traceback
+from bs4 import BeautifulSoup
+import requests
+import talib
 
 class StockMonitor:
     def __init__(self):
@@ -17,25 +21,32 @@ class StockMonitor:
         self.error_count = {}
         self.discord_webhook = os.getenv('DISCORD_WEBHOOK')
         self.slack_webhook = os.getenv('SLACK_WEBHOOK')
+        self.high_potential_stocks = []
 
     async def get_stock_symbols(self):
         url = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                if response.status == 200:
-                    content = await response.text()
-                    reader = csv.reader(StringIO(content), delimiter='|')
-                    next(reader)  # Skip the header
-                    symbols = [row[0] for row in reader if row[0] != "File Creation Time" and not row[0].endswith(('W', 'R'))]
-                    return symbols
-                else:
-                    print(f"Failed to fetch stock symbols: HTTP {response.status}")
-                    return []
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        content = await response.text()
+                        reader = csv.reader(StringIO(content), delimiter='|')
+                        next(reader)  # Skip the header
+                        symbols = [row[0] for row in reader if row[0] != "File Creation Time" and not row[0].endswith(('W', 'R'))]
+                        print(f"Successfully fetched {len(symbols)} symbols")
+                        return symbols
+                    else:
+                        print(f"Failed to fetch stock symbols: HTTP {response.status}")
+                        return []
+        except Exception as e:
+            print(f"Error in get_stock_symbols: {str(e)}")
+            traceback.print_exc()
+            return []
 
     async def get_stock_data(self, symbol):
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
         params = {
-            "range": "1mo",
+            "range": "1y",
             "interval": "1d"
         }
         headers = {
@@ -64,8 +75,15 @@ class StockMonitor:
             if attempt < max_retries - 1:
                 await asyncio.sleep(1)  # Wait 1 second before retrying
 
-        self.error_count[symbol] = self.error_count.get(symbol, 0) + 1
-        return None
+        # If all attempts fail, try the failover API
+        return await self.get_stock_data_failover(symbol)
+
+    async def get_stock_data_failover(self, symbol):
+        # This is a placeholder for a failover API. In a real scenario, you'd implement
+        # a connection to an alternative stock data provider.
+        print(f"Attempting to fetch data for {symbol} from failover API...")
+        # Implement your failover logic here
+        return None  # Return None if failover also fails
 
     def process_stock_data(self, symbol, data):
         if 'chart' in data and 'result' in data['chart'] and data['chart']['result']:
@@ -137,6 +155,9 @@ class StockMonitor:
         df['ATR'] = df['TR'].rolling(window=14).mean()
         atr = df['ATR'].iloc[-1]
 
+        # Calculate RSI
+        rsi = talib.RSI(df['Close'].values, timeperiod=14)[-1]
+
         # Find recent support and resistance levels
         recent_high = df['High'].tail(20).max()
         recent_low = df['Low'].tail(20).min()
@@ -152,6 +173,9 @@ class StockMonitor:
         if current_price < sma_5:
             moderate_exit = max(moderate_exit, sma_5)
 
+        # Calculate potential profit
+        potential_profit = (aggressive_exit - current_price) / current_price * 100
+
         return {
             'symbol': stock_data['symbol'],
             'current_price': current_price,
@@ -161,6 +185,7 @@ class StockMonitor:
             'avg_volume': avg_volume,
             'volatility': volatility,
             'atr': atr,
+            'rsi': rsi,
             'sma_5': sma_5,
             'sma_20': sma_20,
             'recent_high': recent_high,
@@ -169,113 +194,60 @@ class StockMonitor:
             'fifty_two_week_low': meta.get('fiftyTwoWeekLow'),
             'conservative_exit': conservative_exit,
             'moderate_exit': moderate_exit,
-            'aggressive_exit': aggressive_exit
+            'aggressive_exit': aggressive_exit,
+            'potential_profit': potential_profit
         }
 
-    async def send_discord_alert(self, message):
-        if not self.discord_webhook:
-            return
-
-        async with aiohttp.ClientSession() as session:
-            webhook = {'content': message}
-            async with session.post(self.discord_webhook, json=webhook) as response:
-                if response.status != 204:
-                    print(f"Failed to send Discord alert: HTTP {response.status}")
-
-    async def send_slack_alert(self, message):
-        if not self.slack_webhook:
-            return
-
-        async with aiohttp.ClientSession() as session:
-            webhook = {'text': message}
-            async with session.post(self.slack_webhook, json=webhook) as response:
-                if response.status != 200:
-                    print(f"Failed to send Slack alert: HTTP {response.status}")
-
-    async def monitor_stock(self, symbol):
-        stock_data = await self.get_stock_data(symbol)
-        if stock_data:
-            metrics = self.calculate_metrics(stock_data)
-            if metrics and metrics['current_price'] > 0 and metrics['open_price'] > 0:
-                price_change_threshold = 5  # Alert if price increase is more than 5%
-                volume_increase_threshold = 2  # Alert if volume is 2 times the average volume
-                min_price = 5  # Minimum price threshold ($5)
-                max_price = 1000  # Maximum price threshold ($1000)
-                min_volume = 100000  # Minimum volume threshold
-
-                is_interesting = False
-                reasons = []
-
-                current_price = metrics['current_price']
-                if min_price <= current_price <= max_price and metrics['total_volume'] >= min_volume:
-                    if metrics['price_change'] > price_change_threshold:
-                        is_interesting = True
-                        reasons.append(f"Price up {metrics['price_change']:.2f}%")
-
-                    volume_increase = metrics['total_volume'] / metrics['avg_volume']
-                    if volume_increase > volume_increase_threshold:
-                        is_interesting = True
-                        reasons.append(f"Volume up {volume_increase:.2f}x average")
-
-                    if is_interesting:
-                        alert_message = f"🚀 HIGH POTENTIAL ALERT for {metrics['symbol']}! 🚀\n"
-                        alert_message += f"Reasons: {', '.join(reasons)}\n"
-                        alert_message += f"Current Price: ${current_price:.2f}\n"
-                        alert_message += f"Today's Volume: {metrics['total_volume']:.0f}\n"
-                        alert_message += f"5-day Avg Volume: {metrics['avg_volume']:.0f}\n"
-                        alert_message += f"Volatility (ATR): ${metrics['atr']:.2f}\n"
-                        alert_message += f"5-day SMA: ${metrics['sma_5']:.2f}\n"
-                        alert_message += f"20-day SMA: ${metrics['sma_20']:.2f}\n"
-
-                        # Exit price suggestions
-                        alert_message += f"Conservative Exit: ${metrics['conservative_exit']:.2f}\n"
-                        alert_message += f"Moderate Exit: ${metrics['moderate_exit']:.2f}\n"
-                        alert_message += f"Aggressive Exit: ${metrics['aggressive_exit']:.2f}\n"
-
-                        # Options suggestions
-                        alert_message += "\nOptions Considerations:\n"
-                        alert_message += "1. Call options: Consider near-the-money calls if bullish\n"
-                        alert_message += "2. Put options: Consider buying puts for downside protection\n"
-                        alert_message += "3. Covered calls: If you own shares, selling calls can generate income\n"
-                        alert_message += "4. Cash-secured puts: Sell puts if you're willing to buy at a lower price\n"
-
-                        alert_message += "\nRemember to check option liquidity and implied volatility before trading!"
-
-                        print(alert_message)
-                        await self.send_discord_alert(alert_message)
-                        await self.send_slack_alert(alert_message)
-
-    async def monitor_all_stocks(self):
-        self.session = aiohttp.ClientSession()
+    def get_news_sentiment(self, symbol):
+        url = f"https://finviz.com/quote.ashx?t={symbol}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
         try:
-            # Process stocks in batches to avoid overwhelming the API
-            batch_size = 10
-            for i in range(0, len(self.symbols), batch_size):
-                batch = self.symbols[i:i+batch_size]
-                tasks = [self.monitor_stock(symbol) for symbol in batch]
-                await asyncio.gather(*tasks)
-                await asyncio.sleep(5)  # Wait 5 seconds between batches
-        finally:
-            await self.session.close()
+            response = requests.get(url, headers=headers)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            news_table = soup.find(id='news-table')
+            news_sentiment = {
+                "positive": 0,
+                "neutral": 0,
+                "negative": 0
+            }
+            if news_table:
+                for row in news_table.find_all('tr'):
+                    headline = row.find_all('td')[1].get_text()
+                    if "upgraded" in headline or "outperform" in headline:
+                        news_sentiment["positive"] += 1
+                    elif "downgraded" in headline or "underperform" in headline:
+                        news_sentiment["negative"] += 1
+                    else:
+                        news_sentiment["neutral"] += 1
+            return news_sentiment
+        except Exception as e:
+            print(f"Error fetching news sentiment for {symbol}: {str(e)}")
+            return None
 
-    def remove_problematic_symbols(self):
-        for symbol, count in self.error_count.items():
-            if count > 3:  # Remove symbols that have failed more than 3 times
-                if symbol in self.symbols:
-                    self.symbols.remove(symbol)
-                    print(f"Removed {symbol} due to repeated errors.")
-        self.error_count.clear()
+    async def process_stocks(self):
+        self.session = aiohttp.ClientSession()
+        self.symbols = await self.get_stock_symbols()
+        for symbol in self.symbols:
+            try:
+                stock_data = await self.get_stock_data(symbol)
+                metrics = self.calculate_metrics(stock_data)
+                if metrics and metrics['potential_profit'] > 10 and metrics['volatility'] < 0.3 and metrics['rsi'] < 30:
+                    sentiment = self.get_news_sentiment(symbol)
+                    if sentiment and sentiment['positive'] > sentiment['negative']:
+                        print(f"High potential stock found: {metrics['symbol']} with potential profit of {metrics['potential_profit']:.2f}%")
+                        self.high_potential_stocks.append(metrics)
+            except Exception as e:
+                print(f"Error processing stock {symbol}: {str(e)}")
+                traceback.print_exc()
 
-async def main():
-    monitor = StockMonitor()
-    monitor.symbols = await monitor.get_stock_symbols()
-    print(f"Monitoring {len(monitor.symbols)} stocks for high-potential opportunities...")
+        await self.session.close()
 
-    while True:
-        await monitor.monitor_all_stocks()
-        monitor.remove_problematic_symbols()
-        print(f"Now monitoring {len(monitor.symbols)} stocks...")
-        await asyncio.sleep(300)  # Wait for 5 minutes before next check
+    async def start(self):
+        await self.process_stocks()
+        # Further logic to notify via Slack or Discord can be added here
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    stock_monitor = StockMonitor()
+    asyncio.run(stock_monitor.start())
