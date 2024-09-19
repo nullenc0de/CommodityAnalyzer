@@ -23,6 +23,8 @@ class StockMonitor:
         self.discord_webhook = os.getenv('DISCORD_WEBHOOK')
         self.slack_webhook = os.getenv('SLACK_WEBHOOK')
         self.high_potential_stocks = []
+        self.processed_count = 0
+        self.total_symbols = 0
 
     async def get_stock_symbols(self):
         url = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
@@ -33,8 +35,9 @@ class StockMonitor:
                         content = await response.text()
                         reader = csv.reader(StringIO(content), delimiter='|')
                         next(reader)  # Skip the header
-                        symbols = [row[0] for row in reader if row[0] != "File Creation Time" and not row[0].endswith(('W', 'R'))]
-                        print(f"Successfully fetched {len(symbols)} symbols")
+                        symbols = [row[0] for row in reader if row[0] != "File Creation Time" and not row[0].endswith(('W', 'R')) and "test" not in row[0].lower()]
+                        self.total_symbols = len(symbols)
+                        print(f"Successfully fetched {self.total_symbols} symbols")
                         return symbols
                     else:
                         print(f"Failed to fetch stock symbols: HTTP {response.status}")
@@ -313,34 +316,52 @@ Profit: ${profit:.2f} ({profit_percentage:.2f}%)
         self.symbols = await self.get_stock_symbols()
         for symbol in self.symbols:
             try:
+                self.processed_count += 1
+                if self.processed_count % 100 == 0:
+                    print(f"Processed {self.processed_count}/{self.total_symbols} symbols")
+
                 stock_data = await self.get_stock_data(symbol)
                 metrics = self.calculate_metrics(stock_data)
-                if metrics and metrics['potential_profit'] > 10 and metrics['volatility'] < 0.3 and metrics['rsi'] < 30 and metrics['risk_reward_ratio'] > 2:
-                    sentiment = self.get_news_sentiment(symbol)
-                    if sentiment and sentiment['positive'] > sentiment['negative']:
-                        stock_info = self.format_stock_info(metrics)
-                        buy_alert = self.format_buy_alert(metrics)
-                        sell_alert = self.format_sell_alert(metrics)
-                        explanation = self.explain_alert(metrics, sentiment)
 
-                        full_message = f"{stock_info}\n{buy_alert}\n{sell_alert}\n\nExplanation:\n{explanation}"
+                if metrics:
+                    print(f"Debug: {symbol} - Potential Profit: {metrics['potential_profit']:.2f}%, Volatility: {metrics['volatility']:.2f}, RSI: {metrics['rsi']:.0f}, Risk-Reward Ratio: {metrics['risk_reward_ratio']:.2f}")
 
-                        # Print to terminal
-                        print(full_message)
+                    if metrics['potential_profit'] > 10 and metrics['volatility'] < 0.3 and metrics['rsi'] < 30 and metrics['risk_reward_ratio'] > 2:
+                        sentiment = self.get_news_sentiment(symbol)
+                        if sentiment and sentiment['positive'] > sentiment['negative']:
+                            stock_info = self.format_stock_info(metrics)
+                            buy_alert = self.format_buy_alert(metrics)
+                            sell_alert = self.format_sell_alert(metrics)
+                            explanation = self.explain_alert(metrics, sentiment)
 
-                        # Send to Discord and Slack
-                        await self.send_discord_message(full_message)
-                        await self.send_slack_message(full_message)
+                            full_message = f"{stock_info}\n{buy_alert}\n{sell_alert}\n\nExplanation:\n{explanation}"
 
-                        self.high_potential_stocks.append(metrics)
+                            # Print to terminal
+                            print(full_message)
+
+                            # Send to Discord and Slack
+                            await self.send_discord_message(full_message)
+                            await self.send_slack_message(full_message)
+
+                            self.high_potential_stocks.append(metrics)
+                    else:
+                        print(f"Debug: {symbol} did not meet all criteria for high potential")
+                else:
+                    print(f"Debug: Unable to calculate metrics for {symbol}")
             except Exception as e:
                 print(f"Error processing stock {symbol}: {str(e)}")
                 traceback.print_exc()
 
         await self.session.close()
+        print(f"Processing complete. Analyzed {self.processed_count} stocks.")
+        print(f"Found {len(self.high_potential_stocks)} high potential stocks.")
 
     async def start(self):
+        start_time = time.time()
         await self.process_stocks()
+        end_time = time.time()
+        execution_time = end_time - start_time
+        print(f"Total execution time: {execution_time:.2f} seconds")
 
 # Main execution block
 if __name__ == "__main__":
