@@ -20,7 +20,7 @@ class StockMonitor:
         self.symbols = []
         self.session = None
         self.error_count = {}
-        self.discord_webhook = os.getenv('https://discord.com/api/webhooks/blah')
+        self.discord_webhook = os.getenv('https://discord.com/api/webhooks/1286420702173597807/hNgcuYY68fm6t0ncWSSGt2QwrQvEybW5uRrr2nXZCMiizQnq6Wguhm41SBJcO8TicQWy')
         self.slack_webhook = os.getenv('SLACK_WEBHOOK')
         self.high_potential_stocks = []
         self.processed_count = 0
@@ -216,182 +216,120 @@ class StockMonitor:
             'risk_reward_ratio': risk_reward_ratio
         }
 
-    def get_news_sentiment(self, symbol):
-        url = f"https://finviz.com/quote.ashx?t={symbol}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        try:
-            response = requests.get(url, headers=headers)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            news_table = soup.find(id='news-table')
-            news_sentiment = {
-                "positive": 0,
-                "neutral": 0,
-                "negative": 0
-            }
-            if news_table:
-                for row in news_table.find_all('tr'):
-                    headline = row.find_all('td')[1].get_text()
-                    if "upgraded" in headline or "outperform" in headline:
-                        news_sentiment["positive"] += 1
-                    elif "downgraded" in headline or "underperform" in headline:
-                        news_sentiment["negative"] += 1
-                    else:
-                        news_sentiment["neutral"] += 1
-            return news_sentiment
-        except Exception as e:
-            print(f"Error fetching news sentiment for {symbol}: {str(e)}")
-            return None
-
-    def format_stock_info(self, metrics):
-        return f"""
-High Potential Stock Found:
-
-Symbol: {metrics['symbol']}
-Current Price: ${metrics['current_price']:.2f}
-Potential Profit: {metrics['potential_profit']:.2f}%
-Entry Price: ${metrics['current_price']:.2f}
-Exit Price: ${metrics['aggressive_exit']:.2f}
-Stop Loss: ${metrics['stop_loss']:.2f}
-Risk-Reward Ratio: {metrics['risk_reward_ratio']:.2f}
-Support Level: ${metrics['recent_low']:.2f}
-Resistance Level: ${metrics['recent_high']:.2f}
-RSI: {metrics['rsi']:.0f}
-MACD: {metrics['macd']:.2f}
-MACD Signal: {metrics['macd_signal']:.2f}
-Bollinger Bandwidth: {metrics['bb_width']:.2f}
-50-Day MA: ${metrics['sma_20']:.2f}
-200-Day MA: ${metrics['sma_5']:.2f}
-"""
-
-    def format_buy_alert(self, metrics):
-        return f"""
-Buy Alert: {metrics['symbol']}
-Entry Price: ${metrics['current_price']:.2f}
-Exit Price: ${metrics['aggressive_exit']:.2f}
-Stop Loss: ${metrics['stop_loss']:.2f}
-"""
-
-    def format_sell_alert(self, metrics):
-        profit = metrics['aggressive_exit'] - metrics['current_price']
-        profit_percentage = (profit / metrics['current_price']) * 100
-        return f"""
-Sell Alert: {metrics['symbol']}
-Profit: ${profit:.2f} ({profit_percentage:.2f}%)
-"""
-
-    def explain_alert(self, metrics, sentiment):
+    def rate_stock(self, metrics):
+        score = 0
         reasons = []
-        if metrics['potential_profit'] > 10:
-            reasons.append(f"The potential profit of {metrics['potential_profit']:.2f}% is significant.")
-        if metrics['volatility'] < 0.3:
-            reasons.append(f"The stock's volatility ({metrics['volatility']:.2f}) is relatively low, suggesting stability.")
+
+        if metrics['price_change'] > 2:
+            score += 1
+            reasons.append('Price increased by more than 2%')
+
+        if metrics['total_volume'] > 500000:
+            score += 1
+            reasons.append('High total volume')
+
+        if metrics['volatility'] > 0.03:
+            score += 1
+            reasons.append('High volatility')
+
         if metrics['rsi'] < 30:
-            reasons.append(f"The RSI of {metrics['rsi']:.0f} indicates the stock may be oversold.")
+            score += 1
+            reasons.append('Oversold conditions (RSI < 30)')
+
         if metrics['macd'] > metrics['macd_signal']:
-            reasons.append("The MACD is above its signal line, suggesting bullish momentum.")
-        if metrics['current_price'] > metrics['sma_20'] > metrics['sma_5']:
-            reasons.append("The price is above both the 50-day and 200-day moving averages, indicating an uptrend.")
-        if metrics['risk_reward_ratio'] > 2:
-            reasons.append(f"The risk-reward ratio of {metrics['risk_reward_ratio']:.2f} is favorable.")
-        if sentiment['positive'] > sentiment['negative']:
-            reasons.append("Recent news sentiment is predominantly positive.")
+            score += 1
+            reasons.append('Bullish MACD crossover')
 
-        explanation = "This stock is being flagged as a high potential opportunity because:\n"
-        explanation += "\n".join(f"- {reason}" for reason in reasons)
-        return explanation
+        if metrics['potential_profit'] > 5:
+            score += 1
+            reasons.append('Potential profit greater than 5%')
 
-    async def send_discord_message(self, message):
-        if self.discord_webhook:
-            async with aiohttp.ClientSession() as session:
-                webhook = Webhook.from_url(self.discord_webhook, session=session)
-                await webhook.send(content=message)
+        return score, reasons
 
-    async def send_slack_message(self, message):
-        if self.slack_webhook:
-            async with aiohttp.ClientSession() as session:
-                await session.post(self.slack_webhook, json={"text": message})
-
-    async def continuous_monitor(self):
-        self.is_monitoring = True
+    async def monitor_stocks(self):
         while self.is_monitoring:
-            print("Starting a new monitoring cycle...")
-            await self.process_stocks()
-            print(f"Monitoring cycle complete. Waiting for {self.monitor_interval} seconds before next cycle.")
+            print("Fetching stock symbols...")
+            self.symbols = await self.get_stock_symbols()
+
+            if not self.symbols:
+                print("No symbols available for monitoring. Retrying in 1 hour...")
+                await asyncio.sleep(self.monitor_interval)
+                continue
+
+            self.processed_count = 0
+            print(f"Monitoring {self.total_symbols} stocks...")
+
+            async with aiohttp.ClientSession() as session:
+                self.session = session
+                tasks = [self.monitor_stock(symbol) for symbol in self.symbols]
+                await asyncio.gather(*tasks)
+
+            print("All stocks processed. Sleeping for 1 hour before next monitoring cycle...")
             await asyncio.sleep(self.monitor_interval)
 
-    async def process_stocks(self):
-        self.session = aiohttp.ClientSession()
-        self.symbols = await self.get_stock_symbols()
-        self.processed_count = 0
-        self.high_potential_stocks = []
-
-        for symbol in self.symbols:
-            try:
-                self.processed_count += 1
-                if self.processed_count % 100 == 0:
-                    print(f"Processed {self.processed_count}/{self.total_symbols} symbols")
-
-                stock_data = await self.get_stock_data(symbol)
+    async def monitor_stock(self, symbol):
+        try:
+            stock_data = await self.get_stock_data(symbol)
+            if stock_data:
                 metrics = self.calculate_metrics(stock_data)
-
                 if metrics:
-                    print(f"Debug: {symbol} - Potential Profit: {metrics['potential_profit']:.2f}%, Volatility: {metrics['volatility']:.2f}, RSI: {metrics['rsi']:.0f}, Risk-Reward Ratio: {metrics['risk_reward_ratio']:.2f}")
-
-                    if metrics['potential_profit'] > 10 and metrics['volatility'] < 0.3 and metrics['rsi'] < 30 and metrics['risk_reward_ratio'] > 2:
-                        sentiment = self.get_news_sentiment(symbol)
-                        if sentiment and sentiment['positive'] > sentiment['negative']:
-                            stock_info = self.format_stock_info(metrics)
-                            buy_alert = self.format_buy_alert(metrics)
-                            sell_alert = self.format_sell_alert(metrics)
-                            explanation = self.explain_alert(metrics, sentiment)
-
-                            full_message = f"{stock_info}\n{buy_alert}\n{sell_alert}\n\nExplanation:\n{explanation}"
-
-                            # Print to terminal
-                            print(full_message)
-
-                            # Send to Discord and Slack
-                            await self.send_discord_message(full_message)
-                            await self.send_slack_message(full_message)
-
-                            self.high_potential_stocks.append(metrics)
+                    score, reasons = self.rate_stock(metrics)
+                    if score >= 3:
+                        print(f"High potential stock: {symbol} (Score: {score}) - {', '.join(reasons)}")
+                        self.high_potential_stocks.append({
+                            'symbol': symbol,
+                            'score': score,
+                            'reasons': reasons,
+                            'metrics': metrics
+                        })
                     else:
-                        print(f"Debug: {symbol} did not meet all criteria for high potential")
-                else:
-                    print(f"Debug: Unable to calculate metrics for {symbol}")
+                        print(f"Stock {symbol} does not meet the criteria (Score: {score})")
+        except Exception as e:
+            print(f"Error processing stock {symbol}: {str(e)}")
+
+        finally:
+            self.processed_count += 1
+            if self.processed_count % 100 == 0:
+                print(f"Processed {self.processed_count}/{self.total_symbols} stocks")
+
+    async def send_to_discord(self, message):
+        if self.discord_webhook:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(self.discord_webhook, json={"content": message}) as response:
+                        if response.status == 204:
+                            print("Message sent to Discord")
+                        else:
+                            print(f"Failed to send message to Discord: HTTP {response.status}")
             except Exception as e:
-                print(f"Error processing stock {symbol}: {str(e)}")
-                traceback.print_exc()
-
-        await self.session.close()
-        print(f"Processing complete. Analyzed {self.processed_count} stocks.")
-        print(f"Found {len(self.high_potential_stocks)} high potential stocks.")
-
-        if not self.high_potential_stocks and not self.is_monitoring:
-            print("No high potential stocks found. Starting continuous monitoring...")
-            await self.continuous_monitor()
-
-    async def start(self, mode='once'):
-        start_time = time.time()
-        if mode == 'monitor':
-            await self.continuous_monitor()
+                print(f"Error sending message to Discord: {str(e)}")
         else:
-            await self.process_stocks()
-        end_time = time.time()
-        execution_time = end_time - start_time
-        print(f"Total execution time: {execution_time:.2f} seconds")
+            print("Discord webhook URL is not set")
 
-    def stop_monitoring(self):
+    async def send_to_slack(self, message):
+        if self.slack_webhook:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(self.slack_webhook, json={"text": message}) as response:
+                        if response.status == 200:
+                            print("Message sent to Slack")
+                        else:
+                            print(f"Failed to send message to Slack: HTTP {response.status}")
+            except Exception as e:
+                print(f"Error sending message to Slack: {str(e)}")
+        else:
+            print("Slack webhook URL is not set")
+
+    async def start_monitoring(self, interval=3600):
+        self.monitor_interval = interval
+        self.is_monitoring = True
+        print("Starting stock monitoring...")
+        await self.monitor_stocks()
+
+    async def stop_monitoring(self):
         self.is_monitoring = False
-        print("Stopping monitoring mode after the current cycle completes.")
+        print("Stopping stock monitoring...")
 
-# Main execution block
 if __name__ == "__main__":
-    stock_monitor = StockMonitor()
-
-    # You can change this to 'monitor' to start in continuous monitoring mode
-    mode = 'once'
-
-    asyncio.run(stock_monitor.start(mode))
+    monitor = StockMonitor()
+    asyncio.run(monitor.start_monitoring(3600))  # Start monitoring with a 1-hour interval
