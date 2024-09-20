@@ -149,21 +149,29 @@ class TechnicalAnalyzer(Analyzer):
             raise
 
 class FundamentalAnalyzer(Analyzer):
+    def fetch_fundamental_indicators(self, ticker: str):
+        stock = yf.Ticker(ticker)
+        info = stock.info
+
+        fundamental_indicators = {
+            'pe_ratio': info.get('trailingPE'),
+            'forward_pe': info.get('forwardPE'),
+            'peg_ratio': info.get('pegRatio'),
+            'price_to_book': info.get('priceToBook'),
+            'debt_to_equity': info.get('debtToEquity'),
+            'current_ratio': info.get('currentRatio'),
+            'profit_margin': info.get('profitMargins'),
+            'return_on_equity': info.get('returnOnEquity'),
+            'revenue_growth': info.get('revenueGrowth'),
+            'eps': info.get('trailingEps'),
+            'free_cash_flow': info.get('freeCashflow')
+        }
+
+        return fundamental_indicators
+
     def analyze(self) -> Tuple[Dict[str, Any], Dict[str, float]]:
         try:
-            self.results = {
-                'pe_ratio': self.info.get('trailingPE'),
-                'forward_pe': self.info.get('forwardPE'),
-                'peg_ratio': self.info.get('pegRatio'),
-                'price_to_book': self.info.get('priceToBook'),
-                'debt_to_equity': self.info.get('debtToEquity'),
-                'current_ratio': self.info.get('currentRatio'),
-                'profit_margin': self.info.get('profitMargin'),
-                'return_on_equity': self.info.get('returnOnEquity'),
-                'revenue_growth': self.info.get('revenueGrowth'),
-                'eps': self.info.get('trailingEps'),
-                'free_cash_flow': self.info.get('freeCashflow')
-            }
+            self.results = self.fetch_fundamental_indicators(self.info['symbol'])
 
             self.score_components = {
                 'pe_ratio': 10 if self.results['pe_ratio'] and self.results['pe_ratio'] < 20 else (-10 if self.results['pe_ratio'] and self.results['pe_ratio'] > 50 else 0),
@@ -300,7 +308,8 @@ class AdvancedStockAnalyzer:
                 'technical': 1.1, 'fundamental': 1.1, 'news_sentiment': 1.2
             },
             'Unknown': {
-                'technical': 1.0, 'fundamental': 1.0, 'news_sentiment': 1.0
+                # This is the second part of the code, continuing from the get_sector_weights method
+            'technical': 1.0, 'fundamental': 1.0, 'news_sentiment': 1.0
             }
         }
         return sector_weights.get(self.sector, sector_weights['Unknown'])
@@ -424,7 +433,7 @@ def analyze_stock(ticker: str, summary: bool = False) -> None:
             print("\nFundamental Indicators:")
             fundamental_indicators = ['pe_ratio', 'forward_pe', 'peg_ratio', 'price_to_book', 'debt_to_equity', 'current_ratio', 'profit_margin', 'return_on_equity', 'revenue_growth', 'eps', 'free_cash_flow']
             for indicator in fundamental_indicators:
-                value = result.get('fundamental', {}).get(indicator)
+                value = result.get(indicator)
                 if isinstance(value, float):
                     print(f"{indicator.replace('_', ' ').title()}: {value:.2f}")
                 elif value is not None:
