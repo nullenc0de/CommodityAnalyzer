@@ -1,3 +1,26 @@
+"""
+Stock Monitor
+
+This script monitors stocks listed on NASDAQ, analyzes their performance,
+and identifies high-potential stocks based on various technical indicators.
+It uses the Yahoo Finance API to fetch stock data and can send notifications
+to Discord and Slack when high-potential stocks are identified.
+
+Main components:
+1. StockMonitor class: Handles all stock monitoring and analysis operations.
+2. get_stock_symbols: Fetches the list of NASDAQ-listed stocks.
+3. get_stock_data: Retrieves historical stock data from Yahoo Finance.
+4. calculate_metrics: Computes various technical indicators for a stock.
+5. score_stock: Assigns a score to a stock based on its metrics.
+6. monitor_stocks: Main loop that continuously monitors stocks.
+7. send_discord_notification: Sends alerts to Discord.
+8. send_slack_notification: Sends alerts to Slack.
+
+Usage:
+Set the DISCORD_WEBHOOK and SLACK_WEBHOOK environment variables before running.
+Run the script with: python stock_monitor.py
+"""
+
 import asyncio
 import aiohttp
 import pandas as pd
@@ -14,6 +37,10 @@ from bs4 import BeautifulSoup
 import requests
 import talib
 from discord import Webhook
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class StockMonitor:
     def __init__(self):
@@ -27,8 +54,10 @@ class StockMonitor:
         self.total_symbols = 0
         self.monitor_interval = 3600  # Default to 1 hour
         self.is_monitoring = False
+        logging.info("StockMonitor initialized")
 
     async def get_stock_symbols(self):
+        logging.info("Fetching stock symbols...")
         url = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
         try:
             async with aiohttp.ClientSession() as session:
@@ -39,17 +68,18 @@ class StockMonitor:
                         next(reader)  # Skip the header
                         symbols = [row[0] for row in reader if row[0] != "File Creation Time" and not row[0].endswith(('W', 'R')) and "test" not in row[0].lower()]
                         self.total_symbols = len(symbols)
-                        print(f"Successfully fetched {self.total_symbols} symbols")
+                        logging.info(f"Successfully fetched {self.total_symbols} symbols")
                         return symbols
                     else:
-                        print(f"Failed to fetch stock symbols: HTTP {response.status}")
+                        logging.error(f"Failed to fetch stock symbols: HTTP {response.status}")
                         return []
         except Exception as e:
-            print(f"Error in get_stock_symbols: {str(e)}")
+            logging.error(f"Error in get_stock_symbols: {str(e)}")
             traceback.print_exc()
             return []
 
     async def get_stock_data(self, symbol):
+        logging.info(f"Fetching data for {symbol}")
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
         params = {
             "range": "1y",
@@ -67,36 +97,31 @@ class StockMonitor:
                         data = await response.json()
                         return self.process_stock_data(symbol, data)
                     elif response.status == 404:
-                        print(f"Stock {symbol} not found on Yahoo Finance")
+                        logging.warning(f"Stock {symbol} not found on Yahoo Finance")
                         return None
                     elif response.status == 429:
                         wait_time = 2 ** attempt + random.random()
-                        print(f"Rate limit hit for {symbol}. Retrying in {wait_time:.2f} seconds...")
+                        logging.warning(f"Rate limit hit for {symbol}. Retrying in {wait_time:.2f} seconds...")
                         await asyncio.sleep(wait_time)
                     else:
-                        print(f"Error fetching data for {symbol}: HTTP Status {response.status}")
+                        logging.error(f"Error fetching data for {symbol}: HTTP Status {response.status}")
             except Exception as e:
-                print(f"Error fetching data for {symbol}: {str(e)}")
+                logging.error(f"Error fetching data for {symbol}: {str(e)}")
 
             if attempt < max_retries - 1:
                 await asyncio.sleep(1)  # Wait 1 second before retrying
 
-        # If all attempts fail, try the failover API
-        return await self.get_stock_data_failover(symbol)
-
-    async def get_stock_data_failover(self, symbol):
-        print(f"Attempting to fetch data for {symbol} from failover API...")
-        # Implement your failover logic here
-        return None  # Return None if failover also fails
+        return None
 
     def process_stock_data(self, symbol, data):
+        logging.info(f"Processing data for {symbol}")
         if 'chart' in data and 'result' in data['chart'] and data['chart']['result']:
             result = data['chart']['result'][0]
             timestamps = result.get('timestamp')
             indicators = result.get('indicators', {}).get('quote', [{}])[0]
 
             if not timestamps or not indicators:
-                print(f"Warning: Incomplete data received for {symbol}")
+                logging.warning(f"Warning: Incomplete data received for {symbol}")
                 return None
 
             df = pd.DataFrame({
@@ -117,12 +142,13 @@ class StockMonitor:
                     'meta': result.get('meta', {})
                 }
             else:
-                print(f"Warning: No valid data points for {symbol}")
+                logging.warning(f"Warning: No valid data points for {symbol}")
         else:
-            print(f"Error: Unexpected data format received for {symbol}")
+            logging.error(f"Error: Unexpected data format received for {symbol}")
         return None
 
     def calculate_metrics(self, stock_data):
+        logging.info(f"Calculating metrics for {stock_data['symbol']}")
         if stock_data is None or stock_data['data'].empty or len(stock_data['data']) < 20:
             return None
 
@@ -167,13 +193,13 @@ class StockMonitor:
 
         # Calculate Bollinger Bands
         upper, middle, lower = talib.BBANDS(df['Close'].values, timeperiod=20)
-        bb_width = (upper[-1] - lower[-1]) / middle[-1]
+        bb_width = (upper[-1] - lower[-1]) / middle[-1] if middle[-1] != 0 else None
 
         recent_high = df['High'].tail(20).max()
         recent_low = df['Low'].tail(20).min()
 
-        conservative_exit = min(current_price * 1.05, current_price + atr)
-        moderate_exit = min(current_price * 1.10, current_price + 1.5 * atr)
+        conservative_exit = min(current_price * 1.05, current_price + atr) if atr is not None else current_price * 1.05
+        moderate_exit = min(current_price * 1.10, current_price + 1.5 * atr) if atr is not None else current_price * 1.10
         aggressive_exit = min(current_price * 1.15, recent_high)
 
         if current_price < sma_20:
@@ -184,7 +210,7 @@ class StockMonitor:
         potential_profit = (aggressive_exit - current_price) / current_price * 100
 
         # Risk management calculations
-        stop_loss = current_price - 2 * atr  # Set stop loss at 2 ATR below current price
+        stop_loss = current_price - 2 * atr if atr is not None else current_price * 0.95
         risk_per_share = current_price - stop_loss
         reward_per_share = aggressive_exit - current_price
         risk_reward_ratio = reward_per_share / risk_per_share if risk_per_share > 0 else 0
@@ -212,124 +238,219 @@ class StockMonitor:
             'moderate_exit': moderate_exit,
             'aggressive_exit': aggressive_exit,
             'potential_profit': potential_profit,
-            'stop_loss': stop_loss,
-            'risk_reward_ratio': risk_reward_ratio
+            'risk_reward_ratio': risk_reward_ratio,
+            'stop_loss': stop_loss
         }
 
-    def rate_stock(self, metrics):
+    def score_stock(self, metrics):
+        logging.info(f"Scoring stock {metrics['symbol']}")
         score = 0
         reasons = []
 
-        if metrics['price_change'] > 2:
-            score += 1
-            reasons.append('Price increased by more than 2%')
+        # Price
+        if metrics['current_price'] < 5:
+            score -= 1
+            reasons.append(f"Low current price: {metrics['current_price']:.2f}")
+        elif metrics['current_price'] > 100:
+            score -= 1
+            reasons.append(f"High current price: {metrics['current_price']:.2f}")
 
-        if metrics['total_volume'] > 500000:
+        # Volume
+        if metrics['total_volume'] > 1000000:
             score += 1
-            reasons.append('High total volume')
+        else:
+            score -= 1
+            reasons.append(f"Low total volume: {metrics['total_volume']:.0f}")
 
-        if metrics['volatility'] > 0.03:
+        # Volatility
+        if metrics['volatility'] is not None and metrics['volatility'] > 0.05:
             score += 1
-            reasons.append('High volatility')
+        else:
+            score -= 1
+            reasons.append(f"Low volatility: {metrics['volatility']:.4f}")
 
+        # RSI
         if metrics['rsi'] < 30:
-            score += 1
-            reasons.append('Oversold conditions (RSI < 30)')
+            score += 2
+            reasons.append(f"RSI indicates oversold: {metrics['rsi']:.2f}")
+        elif metrics['rsi'] > 70:
+            score -= 1
+            reasons.append(f"RSI indicates overbought: {metrics['rsi']:.2f}")
 
+        # MACD
         if metrics['macd'] > metrics['macd_signal']:
             score += 1
-            reasons.append('Bullish MACD crossover')
+        else:
+            score -= 1
+            reasons.append(f"MACD is below signal: MACD={metrics['macd']:.4f}, Signal={metrics['macd_signal']:.4f}")
 
-        if metrics['potential_profit'] > 5:
+        # Bollinger Bands
+        if metrics['bb_width'] is not None and metrics['bb_width'] < 0.1:
             score += 1
-            reasons.append('Potential profit greater than 5%')
+        else:
+            score -= 1
+            reasons.append(f"Wide Bollinger Bands: {metrics['bb_width']:.4f}")
+
+        # Risk/Reward Ratio
+        if metrics['risk_reward_ratio'] > 2:
+            score += 2
+        elif metrics['risk_reward_ratio'] < 1:
+            score -= 2
+            reasons.append(f"Risk/Reward ratio is unfavorable: {metrics['risk_reward_ratio']:.2f}")
+
+        # Potential Profit
+        if metrics['potential_profit'] > 10:
+            score += 2
+            reasons.append(f"High potential profit: {metrics['potential_profit']:.2f}%")
 
         return score, reasons
 
     async def monitor_stocks(self):
-        while self.is_monitoring:
-            print("Fetching stock symbols...")
-            self.symbols = await self.get_stock_symbols()
+        logging.info("Starting stock monitoring...")
+        self.symbols = await self.get_stock_symbols()
+        if not self.symbols:
+            logging.warning("No stock symbols to monitor.")
+            return
 
-            if not self.symbols:
-                print("No symbols available for monitoring. Retrying in 1 hour...")
-                await asyncio.sleep(self.monitor_interval)
-                continue
+        async with aiohttp.ClientSession() as session:
+            self.session = session
+            self.is_monitoring = True
+            while self.is_monitoring:
+                try:
+                    logging.info("Starting new monitoring cycle...")
+                    random.shuffle(self.symbols)
 
-            self.processed_count = 0
-            print(f"Monitoring {self.total_symbols} stocks...")
+                    for symbol in self.symbols:
+                        stock_data = await self.get_stock_data(symbol)
+                        if stock_data:
+                            metrics = self.calculate_metrics(stock_data)
+                            if metrics:
+                                score, reasons = self.score_stock(metrics)
+                                if score > 5:  # Threshold for high-potential stocks
+                                    analysis = {
+                                        'symbol': symbol,
+                                        'score': score,
+                                        'reasons': reasons,
+                                        'metrics': metrics
+                                    }
+                                    self.high_potential_stocks.append(analysis)
+                                    logging.info(f"High potential stock detected: {symbol}, Score: {score}")
+                                    await self.send_discord_notification(analysis)
+                                    await self.send_slack_notification(analysis)
 
-            async with aiohttp.ClientSession() as session:
-                self.session = session
-                tasks = [self.monitor_stock(symbol) for symbol in self.symbols]
-                await asyncio.gather(*tasks)
+                        logging.info(f"Processed {symbol}")
 
-            print("All stocks processed. Sleeping for 1 hour before next monitoring cycle...")
-            await asyncio.sleep(self.monitor_interval)
+                    logging.info(f"Completed monitoring cycle with {len(self.high_potential_stocks)} high-potential stocks.")
 
-    async def monitor_stock(self, symbol):
+                    logging.info(f"Sleeping for {self.monitor_interval} seconds before next cycle...")
+                    await asyncio.sleep(self.monitor_interval)
+
+                except Exception as e:
+                    logging.error(f"Error in monitoring loop: {str(e)}")
+                    traceback.print_exc()
+
+            logging.info("Stock monitoring stopped.")
+
+    async def send_discord_notification(self, analysis):
+        logging.info(f"Sending Discord notification for {analysis['symbol']}")
+        if not self.discord_webhook:
+            logging.warning("Discord webhook URL is not set. Skipping notification.")
+            return
+
         try:
-            stock_data = await self.get_stock_data(symbol)
-            if stock_data:
-                metrics = self.calculate_metrics(stock_data)
-                if metrics:
-                    score, reasons = self.rate_stock(metrics)
-                    if score >= 3:
-                        print(f"High potential stock: {symbol} (Score: {score}) - {', '.join(reasons)}")
-                        self.high_potential_stocks.append({
-                            'symbol': symbol,
-                            'score': score,
-                            'reasons': reasons,
-                            'metrics': metrics
-                        })
-                    else:
-                        print(f"Stock {symbol} does not meet the criteria (Score: {score})")
+            async with aiohttp.ClientSession() as session:
+                webhook = Webhook.from_url(self.discord_webhook, session=session)
+                embed = {
+                    "title": f"High Potential Stock: {analysis['symbol']}",
+                    "description": f"Score: {analysis['score']}\nReasons: {', '.join(analysis['reasons'])}",
+                    "fields": [
+                        {"name": "Current Price", "value": f"${analysis['metrics']['current_price']:.2f}", "inline": True},
+                        {"name": "Potential Profit", "value": f"{analysis['metrics']['potential_profit']:.2f}%", "inline": True},
+                        {"name": "Risk-Reward Ratio", "value": f"{analysis['metrics']['risk_reward_ratio']:.2f}", "inline": True},
+                        {"name": "Conservative Exit", "value": f"${analysis['metrics']['conservative_exit']:.2f}", "inline": True},
+                        {"name": "Moderate Exit", "value": f"${analysis['metrics']['moderate_exit']:.2f}", "inline": True},
+                        {"name": "Aggressive Exit", "value": f"${analysis['metrics']['aggressive_exit']:.2f}", "inline": True},
+                        {"name": "Stop Loss", "value": f"${analysis['metrics']['stop_loss']:.2f}", "inline": True},
+                        {"name": "RSI", "value": f"{analysis['metrics']['rsi']:.2f}", "inline": True},
+                        {"name": "MACD", "value": f"{analysis['metrics']['macd']:.4f}", "inline": True}
+                    ],
+                    "color": 0x00ff00  # Green color
+                }
+                await webhook.send(embed=embed)
+                logging.info(f"Discord notification sent for {analysis['symbol']}")
         except Exception as e:
-            print(f"Error processing stock {symbol}: {str(e)}")
+            logging.error(f"Error sending Discord notification: {str(e)}")
+            traceback.print_exc()
 
-        finally:
-            self.processed_count += 1
-            if self.processed_count % 100 == 0:
-                print(f"Processed {self.processed_count}/{self.total_symbols} stocks")
+    async def send_slack_notification(self, analysis):
+        logging.info(f"Sending Slack notification for {analysis['symbol']}")
+        if not self.slack_webhook:
+            logging.warning("Slack webhook URL is not set. Skipping notification.")
+            return
 
-    async def send_to_discord(self, message):
-        if self.discord_webhook:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(self.discord_webhook, json={"content": message}) as response:
-                        if response.status == 204:
-                            print("Message sent to Discord")
-                        else:
-                            print(f"Failed to send message to Discord: HTTP {response.status}")
-            except Exception as e:
-                print(f"Error sending message to Discord: {str(e)}")
-        else:
-            print("Discord webhook URL is not set")
+        try:
+            message = {
+                "text": f"High Potential Stock: {analysis['symbol']}",
+                "attachments": [
+                    {
+                        "color": "#36a64f",
+                        "fields": [
+                            {"title": "Score", "value": str(analysis['score']), "short": True},
+                            {"title": "Current Price", "value": f"${analysis['metrics']['current_price']:.2f}", "short": True},
+                            {"title": "Potential Profit", "value": f"{analysis['metrics']['potential_profit']:.2f}%", "short": True},
+                            {"title": "Risk-Reward Ratio", "value": f"{analysis['metrics']['risk_reward_ratio']:.2f}", "short": True},
+                            {"title": "Conservative Exit", "value": f"${analysis['metrics']['conservative_exit']:.2f}", "short": True},
+                            {"title": "Moderate Exit", "value": f"${analysis['metrics']['moderate_exit']:.2f}", "short": True},
+                            {"title": "Aggressive Exit", "value": f"${analysis['metrics']['aggressive_exit']:.2f}", "short": True},
+                            {"title": "Stop Loss", "value": f"${analysis['metrics']['stop_loss']:.2f}", "short": True},
+                            {"title": "RSI", "value": f"{analysis['metrics']['rsi']:.2f}", "short": True},
+                            {"title": "MACD", "value": f"{analysis['metrics']['macd']:.4f}", "short": True},
+                            {"title": "Reasons", "value": ", ".join(analysis['reasons'])}
+                        ]
+                    }
+                ]
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(self.slack_webhook, json=message) as response:
+                    if response.status == 200:
+                        logging.info(f"Slack notification sent for {analysis['symbol']}")
+                    else:
+                        logging.error(f"Failed to send Slack notification: HTTP {response.status}")
+        except Exception as e:
+            logging.error(f"Error sending Slack notification: {str(e)}")
+            traceback.print_exc()
 
-    async def send_to_slack(self, message):
-        if self.slack_webhook:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(self.slack_webhook, json={"text": message}) as response:
-                        if response.status == 200:
-                            print("Message sent to Slack")
-                        else:
-                            print(f"Failed to send message to Slack: HTTP {response.status}")
-            except Exception as e:
-                print(f"Error sending message to Slack: {str(e)}")
-        else:
-            print("Slack webhook URL is not set")
-
-    async def start_monitoring(self, interval=3600):
-        self.monitor_interval = interval
-        self.is_monitoring = True
-        print("Starting stock monitoring...")
-        await self.monitor_stocks()
-
-    async def stop_monitoring(self):
-        self.is_monitoring = False
-        print("Stopping stock monitoring...")
-
+# Main execution
 if __name__ == "__main__":
+    logging.info("Script started")
     monitor = StockMonitor()
-    asyncio.run(monitor.start_monitoring(3600))  # Start monitoring with a 1-hour interval
+    try:
+        asyncio.run(monitor.monitor_stocks())
+    except KeyboardInterrupt:
+        logging.info("\nMonitoring stopped by user.")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred: {str(e)}")
+        traceback.print_exc()
+    finally:
+        logging.info("Stock monitoring has been stopped and cleaned up.")
+
+    # Print summary of high potential stocks
+    if monitor.high_potential_stocks:
+        logging.info("\nHigh Potential Stocks Summary:")
+        for stock in monitor.high_potential_stocks:
+            logging.info(f"\nSymbol: {stock['symbol']}")
+            logging.info(f"Score: {stock['score']}")
+            logging.info(f"Current Price: ${stock['metrics']['current_price']:.2f}")
+            logging.info(f"Potential Profit: {stock['metrics']['potential_profit']:.2f}%")
+            logging.info(f"Risk-Reward Ratio: {stock['metrics']['risk_reward_ratio']:.2f}")
+            logging.info(f"Conservative Exit: ${stock['metrics']['conservative_exit']:.2f}")
+            logging.info(f"Moderate Exit: ${stock['metrics']['moderate_exit']:.2f}")
+            logging.info(f"Aggressive Exit: ${stock['metrics']['aggressive_exit']:.2f}")
+            logging.info(f"Stop Loss: ${stock['metrics']['stop_loss']:.2f}")
+            logging.info("Reasons:")
+            for reason in stock['reasons']:
+                logging.info(f"- {reason}")
+    else:
+        logging.info("\nNo high potential stocks were found during this run.")
+
+    logging.info("Script execution completed.")
