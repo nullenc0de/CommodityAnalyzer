@@ -182,58 +182,76 @@ class FundamentalAnalyzer(Analyzer):
             raise
 
 class NewsSentimentAnalyzer(Analyzer):
+    def __init__(self, data: pd.DataFrame, info: Dict[str, Any]):
+        super().__init__(data, info)
+        self.api_key = "THUTRZX4CJ4MC33O"  # Replace with your actual API key
+
     def analyze(self) -> Tuple[Dict[str, Any], Dict[str, float]]:
         try:
             symbol = self.info['symbol']
             news_sentiment = self.get_news_sentiment(symbol)
-
-            total_sentiment = sum(news_sentiment.values())
-            if total_sentiment > 0:
-                sentiment_score = (news_sentiment['positive'] - news_sentiment['negative']) / total_sentiment
+            
+            if news_sentiment:
+                sentiment_score = news_sentiment['average_score']
+                sentiment_label = news_sentiment['average_label']
             else:
                 sentiment_score = 0
+                sentiment_label = "Neutral"
 
             self.results = {
                 'news_sentiment': news_sentiment,
-                'sentiment_score': sentiment_score
+                'sentiment_score': sentiment_score,
+                'sentiment_label': sentiment_label
             }
 
             self.score_components = {
-                'news_sentiment': 10 * sentiment_score  # Scale from -10 to 10
+                'news_sentiment': 10 * (sentiment_score - 0.5)  # Scale from -5 to 5
             }
 
             return self.results, self.score_components
         except Exception as e:
             print(f"Error in news sentiment analysis: {str(e)}")
-            raise
-
-    def get_news_sentiment(self, symbol: str) -> Dict[str, int]:
-        url = f"https://finviz.com/quote.ashx?t={symbol}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        try:
-            response = requests.get(url, headers=headers)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            news_table = soup.find(id='news-table')
-            news_sentiment = {
-                "positive": 0,
-                "neutral": 0,
-                "negative": 0
+            self.results = {
+                'news_sentiment': {},
+                'sentiment_score': 0,
+                'sentiment_label': "Error"
             }
-            if news_table:
-                for row in news_table.find_all('tr'):
-                    headline = row.find_all('td')[1].get_text().lower()
-                    if any(word in headline for word in ["upgraded", "outperform", "buy", "bullish"]):
-                        news_sentiment["positive"] += 1
-                    elif any(word in headline for word in ["downgraded", "underperform", "sell", "bearish"]):
-                        news_sentiment["negative"] += 1
-                    else:
-                        news_sentiment["neutral"] += 1
-            return news_sentiment
+            self.score_components = {'news_sentiment': 0}
+            return self.results, self.score_components
+
+    def get_news_sentiment(self, symbol: str) -> Dict[str, Any]:
+        url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={symbol}&apikey={self.api_key}"
+        try:
+            response = requests.get(url)
+            data = response.json()
+            
+            if 'feed' not in data:
+                print(f"No news data found for {symbol}. API response: {data}")
+                return {}
+
+            feed = data['feed']
+            sentiment_scores = []
+            sentiment_labels = []
+            
+            for item in feed:
+                sentiment_scores.append(float(item['overall_sentiment_score']))
+                sentiment_labels.append(item['overall_sentiment_label'])
+            
+            if not sentiment_scores:
+                print(f"No sentiment scores found for {symbol}")
+                return {}
+
+            average_score = sum(sentiment_scores) / len(sentiment_scores)
+            average_label = max(set(sentiment_labels), key=sentiment_labels.count)
+            
+            return {
+                'average_score': average_score,
+                'average_label': average_label,
+                'items': [{'title': item['title'], 'sentiment_score': item['overall_sentiment_score'], 'sentiment_label': item['overall_sentiment_label']} for item in feed[:5]]  # Include top 5 news items
+            }
         except Exception as e:
             print(f"Error fetching news for {symbol}: {str(e)}")
-            return {"positive": 0, "neutral": 0, "negative": 0}
+            return {}
 
 class AdvancedStockAnalyzer:
     def __init__(self, ticker: str):
@@ -384,7 +402,7 @@ def analyze_stock(ticker: str, summary: bool = False) -> None:
     try:
         analyzer = AdvancedStockAnalyzer(ticker)
         result = analyzer.run_analysis()
-
+        
         if summary:
             print(analyzer.get_summary())
         else:
@@ -395,38 +413,63 @@ def analyze_stock(ticker: str, summary: bool = False) -> None:
             print(f"Suggested Action: {result['overall']['suggested_timeframe']}")
 
             print("\nTechnical Indicators:")
-            for key, value in result.items():
-                if key not in ['overall', 'news_sentiment']:
-                    if isinstance(value, float):
-                        print(f"{key.replace('_', ' ').title()}: {value:.2f}")
-                    else:
-                        print(f"{key.replace('_', ' ').title()}: {value}")
+            technical_indicators = ['trend', 'current_price', 'sma5', 'sma20', 'sma50', 'sma200', 'rsi', 'macd', 'macd_signal', 'atr', 'bb_width', 'avg_volume', 'volatility', 'recent_high', 'recent_low', 'fifty_two_week_high', 'fifty_two_week_low', 'conservative_exit', 'moderate_exit', 'aggressive_exit', 'potential_profit', 'risk_reward_ratio', 'stop_loss']
+            for indicator in technical_indicators:
+                value = result.get(indicator)
+                if isinstance(value, float):
+                    print(f"{indicator.replace('_', ' ').title()}: {value:.2f}")
+                else:
+                    print(f"{indicator.replace('_', ' ').title()}: {value}")
 
             print("\nFundamental Indicators:")
-            for key, value in result.get('fundamental', {}).items():
+            fundamental_indicators = ['pe_ratio', 'forward_pe', 'peg_ratio', 'price_to_book', 'debt_to_equity', 'current_ratio', 'profit_margin', 'return_on_equity', 'revenue_growth', 'eps', 'free_cash_flow']
+            for indicator in fundamental_indicators:
+                value = result.get('fundamental', {}).get(indicator)
                 if isinstance(value, float):
-                    print(f"{key.replace('_', ' ').title()}: {value:.2f}")
+                    print(f"{indicator.replace('_', ' ').title()}: {value:.2f}")
                 elif value is not None:
-                    print(f"{key.replace('_', ' ').title()}: {value}")
+                    print(f"{indicator.replace('_', ' ').title()}: {value}")
                 else:
-                    print(f"{key.replace('_', ' ').title()}: N/A")
+                    print(f"{indicator.replace('_', ' ').title()}: N/A")
 
             print("\nNews Sentiment:")
             sentiment = result.get('news_sentiment', {})
-            print(f"Sentiment Score: {sentiment.get('sentiment_score', 'N/A')}")
-            print(f"Positive News: {sentiment.get('news_sentiment', {}).get('positive', 'N/A')}")
-            print(f"Neutral News: {sentiment.get('news_sentiment', {}).get('neutral', 'N/A')}")
-            print(f"Negative News: {sentiment.get('news_sentiment', {}).get('negative', 'N/A')}")
+            if isinstance(sentiment, dict) and sentiment:
+                sentiment_score = sentiment.get('sentiment_score', 'N/A')
+                sentiment_label = sentiment.get('sentiment_label', 'N/A')
+                
+                if isinstance(sentiment_score, (int, float)):
+                    print(f"Average Sentiment Score: {sentiment_score:.4f}")
+                else:
+                    print(f"Average Sentiment Score: {sentiment_score}")
+                
+                print(f"Average Sentiment Label: {sentiment_label}")
+                
+                print("\nTop News Items:")
+                for item in sentiment.get('items', []):
+                    print(f"- {item['title']}")
+                    item_score = item.get('sentiment_score', 'N/A')
+                    if isinstance(item_score, (int, float)):
+                        print(f"  Score: {item_score:.4f}, Label: {item['sentiment_label']}")
+                    else:
+                        print(f"  Score: {item_score}, Label: {item['sentiment_label']}")
+            else:
+                print("No sentiment data available. This could be due to API limitations or no recent news for this stock.")
 
             print("\nScore Components:")
             for component, score in result['overall']['score_components'].items():
                 print(f"{component.replace('_', ' ').title()}: {score:.2f}")
 
-            analyzer.plot_technical_indicators()
+            try:
+                analyzer.plot_technical_indicators()
+            except Exception as plot_error:
+                print(f"Error plotting technical indicators: {str(plot_error)}")
 
             print("\nNote: This analysis is for informational purposes only and should not be considered as financial advice.")
+
     except Exception as e:
         print(f"Error in analyzing stock: {str(e)}")
+        print("Please check if the ticker symbol is correct and try again.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stock Analysis Tool")
