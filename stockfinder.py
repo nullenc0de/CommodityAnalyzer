@@ -1,456 +1,437 @@
 """
-Stock Monitor
+Comprehensive Stock Analysis Script
 
-This script monitors stocks listed on NASDAQ, analyzes their performance,
-and identifies high-potential stocks based on various technical indicators.
-It uses the Yahoo Finance API to fetch stock data and can send notifications
-to Discord and Slack when high-potential stocks are identified.
-
-Main components:
-1. StockMonitor class: Handles all stock monitoring and analysis operations.
-2. get_stock_symbols: Fetches the list of NASDAQ-listed stocks.
-3. get_stock_data: Retrieves historical stock data from Yahoo Finance.
-4. calculate_metrics: Computes various technical indicators for a stock.
-5. score_stock: Assigns a score to a stock based on its metrics.
-6. monitor_stocks: Main loop that continuously monitors stocks.
-7. send_discord_notification: Sends alerts to Discord.
-8. send_slack_notification: Sends alerts to Slack.
+This script performs an in-depth analysis of a given stock, incorporating technical,
+fundamental, and news sentiment analysis. It provides an overall score, recommendation,
+and detailed breakdown of various factors influencing the stock's performance.
 
 Usage:
-Set the DISCORD_WEBHOOK and SLACK_WEBHOOK environment variables before running.
-Run the script with: python stock_monitor.py
+python script_name.py TICKER [-s]
+
+TICKER: Stock symbol (e.g., AAPL, msft)
+-s: Optional flag for summary output
+
+Example:
+python script_name.py AAPL -s
+
+Note: This script is for educational purposes only and should not be used for actual trading
+without further development and risk management considerations.
+
+Dependencies: yfinance, pandas, numpy, matplotlib, talib, requests, beautifulsoup4
 """
 
-import asyncio
-import aiohttp
+import warnings
+import os
+
+# Suppress specific warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Suppress Matplotlib font manager warning
+os.environ['MPLCONFIGDIR'] = os.getcwd() + "/matplotlib_config"
+
+# Rest of the imports
+import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-import time
-import json
-import os
-import csv
-from io import StringIO
-import random
-import traceback
-from bs4 import BeautifulSoup
-import requests
 import talib
-from discord import Webhook
-import logging
+import matplotlib.pyplot as plt
+from abc import ABC, abstractmethod
+import requests
+from bs4 import BeautifulSoup
+from functools import lru_cache
+from typing import Dict, Tuple, List, Any
+import argparse
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+class Analyzer(ABC):
+    def __init__(self, data: pd.DataFrame, info: Dict[str, Any]):
+        self.data = data
+        self.info = info
+        self.results: Dict[str, Any] = {}
+        self.score_components: Dict[str, float] = {}
 
-class StockMonitor:
-    def __init__(self):
-        self.symbols = []
-        self.session = None
-        self.error_count = {}
-        self.discord_webhook = os.getenv('https://discord.com/api/webhooks/1286420702173597807/hNgcuYY68fm6t0ncWSSGt2QwrQvEybW5uRrr2nXZCMiizQnq6Wguhm41SBJcO8TicQWy')
-        self.slack_webhook = os.getenv('SLACK_WEBHOOK')
-        self.high_potential_stocks = []
-        self.processed_count = 0
-        self.total_symbols = 0
-        self.monitor_interval = 3600  # Default to 1 hour
-        self.is_monitoring = False
-        logging.info("StockMonitor initialized")
+    @abstractmethod
+    def analyze(self) -> Tuple[Dict[str, Any], Dict[str, float]]:
+        pass
 
-    async def get_stock_symbols(self):
-        logging.info("Fetching stock symbols...")
-        url = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
+class TechnicalAnalyzer(Analyzer):
+    def __init__(self, data: pd.DataFrame, info: Dict[str, Any]):
+        super().__init__(data, info)
+        self.close_prices = self.data['Close']
+        self.high_prices = self.data['High']
+        self.low_prices = self.data['Low']
+        self.volumes = self.data['Volume']
+
+    @lru_cache(maxsize=None)
+    def calculate_indicators(self) -> None:
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        content = await response.text()
-                        reader = csv.reader(StringIO(content), delimiter='|')
-                        next(reader)  # Skip the header
-                        symbols = [row[0] for row in reader if row[0] != "File Creation Time" and not row[0].endswith(('W', 'R')) and "test" not in row[0].lower()]
-                        self.total_symbols = len(symbols)
-                        logging.info(f"Successfully fetched {self.total_symbols} symbols")
-                        return symbols
-                    else:
-                        logging.error(f"Failed to fetch stock symbols: HTTP {response.status}")
-                        return []
+            self.data['SMA5'] = talib.SMA(self.close_prices, timeperiod=5)
+            self.data['SMA20'] = talib.SMA(self.close_prices, timeperiod=20)
+            self.data['SMA50'] = talib.SMA(self.close_prices, timeperiod=50)
+            self.data['SMA200'] = talib.SMA(self.close_prices, timeperiod=200)
+            self.data['RSI'] = talib.RSI(self.close_prices, timeperiod=14)
+            self.data['MACD'], self.data['MACD_Signal'], _ = talib.MACD(self.close_prices)
+            self.data['ATR'] = talib.ATR(self.high_prices, self.low_prices, self.close_prices, timeperiod=14)
+            upper, middle, lower = talib.BBANDS(self.close_prices, timeperiod=20)
+            self.data['BB_Width'] = (upper - lower) / middle
         except Exception as e:
-            logging.error(f"Error in get_stock_symbols: {str(e)}")
-            traceback.print_exc()
-            return []
+            print(f"Error calculating technical indicators: {str(e)}")
+            raise
 
-    async def get_stock_data(self, symbol):
-        logging.info(f"Fetching data for {symbol}")
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-        params = {
-            "range": "1y",
-            "interval": "1d"
-        }
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                await asyncio.sleep(0.5 + random.random())  # Add a random delay between 0.5 and 1.5 seconds
-                async with self.session.get(url, params=params, headers=headers) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return self.process_stock_data(symbol, data)
-                    elif response.status == 404:
-                        logging.warning(f"Stock {symbol} not found on Yahoo Finance")
-                        return None
-                    elif response.status == 429:
-                        wait_time = 2 ** attempt + random.random()
-                        logging.warning(f"Rate limit hit for {symbol}. Retrying in {wait_time:.2f} seconds...")
-                        await asyncio.sleep(wait_time)
-                    else:
-                        logging.error(f"Error fetching data for {symbol}: HTTP Status {response.status}")
-            except Exception as e:
-                logging.error(f"Error fetching data for {symbol}: {str(e)}")
-
-            if attempt < max_retries - 1:
-                await asyncio.sleep(1)  # Wait 1 second before retrying
-
-        return None
-
-    def process_stock_data(self, symbol, data):
-        logging.info(f"Processing data for {symbol}")
-        if 'chart' in data and 'result' in data['chart'] and data['chart']['result']:
-            result = data['chart']['result'][0]
-            timestamps = result.get('timestamp')
-            indicators = result.get('indicators', {}).get('quote', [{}])[0]
-
-            if not timestamps or not indicators:
-                logging.warning(f"Warning: Incomplete data received for {symbol}")
-                return None
-
-            df = pd.DataFrame({
-                'Timestamp': pd.to_datetime(timestamps, unit='s'),
-                'Open': indicators.get('open'),
-                'High': indicators.get('high'),
-                'Low': indicators.get('low'),
-                'Close': indicators.get('close'),
-                'Volume': indicators.get('volume')
-            })
-            df.set_index('Timestamp', inplace=True)
-            df = df.dropna()  # Remove any rows with NaN values
-
-            if not df.empty:
-                return {
-                    'symbol': symbol,
-                    'data': df,
-                    'meta': result.get('meta', {})
-                }
-            else:
-                logging.warning(f"Warning: No valid data points for {symbol}")
-        else:
-            logging.error(f"Error: Unexpected data format received for {symbol}")
-        return None
-
-    def calculate_metrics(self, stock_data):
-        logging.info(f"Calculating metrics for {stock_data['symbol']}")
-        if stock_data is None or stock_data['data'].empty or len(stock_data['data']) < 20:
-            return None
-
-        df = stock_data['data']
-        meta = stock_data['meta']
-
-        current_price = df['Close'].iloc[-1]
-        open_price = df['Open'].iloc[-1]
-
-        if open_price == 0 or pd.isna(open_price) or current_price == 0 or pd.isna(current_price):
-            return None
-
-        price_change = (current_price - open_price) / open_price * 100 if open_price != current_price else 0
-
-        total_volume = df['Volume'].sum()
-        avg_volume = df['Volume'].mean()
-
-        if total_volume < 10000 or avg_volume < 1000:
-            return None
-
-        returns = df['Close'].pct_change().dropna()
-        volatility = returns.std() * np.sqrt(252) if len(returns) > 1 else None
-
-        sma_5 = df['Close'].rolling(window=5).mean().iloc[-1]
-        sma_20 = df['Close'].rolling(window=20).mean().iloc[-1]
-
-        # Calculate ATR
-        df['H-L'] = df['High'] - df['Low']
-        df['H-PC'] = abs(df['High'] - df['Close'].shift(1))
-        df['L-PC'] = abs(df['Low'] - df['Close'].shift(1))
-        df['TR'] = df[['H-L', 'H-PC', 'L-PC']].max(axis=1)
-        df['ATR'] = df['TR'].rolling(window=14).mean()
-        atr = df['ATR'].iloc[-1]
-
-        # Calculate RSI
-        rsi = talib.RSI(df['Close'].values, timeperiod=14)[-1]
-
-        # Calculate MACD
-        macd, signal, _ = talib.MACD(df['Close'].values)
-        macd = macd[-1]
-        signal = signal[-1]
-
-        # Calculate Bollinger Bands
-        upper, middle, lower = talib.BBANDS(df['Close'].values, timeperiod=20)
-        bb_width = (upper[-1] - lower[-1]) / middle[-1] if middle[-1] != 0 else None
-
-        recent_high = df['High'].tail(20).max()
-        recent_low = df['Low'].tail(20).min()
-
-        conservative_exit = min(current_price * 1.05, current_price + atr) if atr is not None else current_price * 1.05
-        moderate_exit = min(current_price * 1.10, current_price + 1.5 * atr) if atr is not None else current_price * 1.10
-        aggressive_exit = min(current_price * 1.15, recent_high)
-
-        if current_price < sma_20:
-            conservative_exit = min(conservative_exit, sma_20)
-        if current_price < sma_5:
-            moderate_exit = max(moderate_exit, sma_5)
-
-        potential_profit = (aggressive_exit - current_price) / current_price * 100
-
-        # Risk management calculations
-        stop_loss = current_price - 2 * atr if atr is not None else current_price * 0.95
-        risk_per_share = current_price - stop_loss
-        reward_per_share = aggressive_exit - current_price
-        risk_reward_ratio = reward_per_share / risk_per_share if risk_per_share > 0 else 0
-
-        return {
-            'symbol': stock_data['symbol'],
-            'current_price': current_price,
-            'open_price': open_price,
-            'price_change': price_change,
-            'total_volume': total_volume,
-            'avg_volume': avg_volume,
-            'volatility': volatility,
-            'atr': atr,
-            'rsi': rsi,
-            'macd': macd,
-            'macd_signal': signal,
-            'bb_width': bb_width,
-            'sma_5': sma_5,
-            'sma_20': sma_20,
-            'recent_high': recent_high,
-            'recent_low': recent_low,
-            'fifty_two_week_high': meta.get('fiftyTwoWeekHigh'),
-            'fifty_two_week_low': meta.get('fiftyTwoWeekLow'),
-            'conservative_exit': conservative_exit,
-            'moderate_exit': moderate_exit,
-            'aggressive_exit': aggressive_exit,
-            'potential_profit': potential_profit,
-            'risk_reward_ratio': risk_reward_ratio,
-            'stop_loss': stop_loss
-        }
-
-    def score_stock(self, metrics):
-        logging.info(f"Scoring stock {metrics['symbol']}")
-        score = 0
-        reasons = []
-
-        # Price
-        if metrics['current_price'] < 5:
-            score -= 1
-            reasons.append(f"Low current price: {metrics['current_price']:.2f}")
-        elif metrics['current_price'] > 100:
-            score -= 1
-            reasons.append(f"High current price: {metrics['current_price']:.2f}")
-
-        # Volume
-        if metrics['total_volume'] > 1000000:
-            score += 1
-        else:
-            score -= 1
-            reasons.append(f"Low total volume: {metrics['total_volume']:.0f}")
-
-        # Volatility
-        if metrics['volatility'] is not None and metrics['volatility'] > 0.05:
-            score += 1
-        else:
-            score -= 1
-            reasons.append(f"Low volatility: {metrics['volatility']:.4f}")
-
-        # RSI
-        if metrics['rsi'] < 30:
-            score += 2
-            reasons.append(f"RSI indicates oversold: {metrics['rsi']:.2f}")
-        elif metrics['rsi'] > 70:
-            score -= 1
-            reasons.append(f"RSI indicates overbought: {metrics['rsi']:.2f}")
-
-        # MACD
-        if metrics['macd'] > metrics['macd_signal']:
-            score += 1
-        else:
-            score -= 1
-            reasons.append(f"MACD is below signal: MACD={metrics['macd']:.4f}, Signal={metrics['macd_signal']:.4f}")
-
-        # Bollinger Bands
-        if metrics['bb_width'] is not None and metrics['bb_width'] < 0.1:
-            score += 1
-        else:
-            score -= 1
-            reasons.append(f"Wide Bollinger Bands: {metrics['bb_width']:.4f}")
-
-        # Risk/Reward Ratio
-        if metrics['risk_reward_ratio'] > 2:
-            score += 2
-        elif metrics['risk_reward_ratio'] < 1:
-            score -= 2
-            reasons.append(f"Risk/Reward ratio is unfavorable: {metrics['risk_reward_ratio']:.2f}")
-
-        # Potential Profit
-        if metrics['potential_profit'] > 10:
-            score += 2
-            reasons.append(f"High potential profit: {metrics['potential_profit']:.2f}%")
-
-        return score, reasons
-
-    async def monitor_stocks(self):
-        logging.info("Starting stock monitoring...")
-        self.symbols = await self.get_stock_symbols()
-        if not self.symbols:
-            logging.warning("No stock symbols to monitor.")
-            return
-
-        async with aiohttp.ClientSession() as session:
-            self.session = session
-            self.is_monitoring = True
-            while self.is_monitoring:
-                try:
-                    logging.info("Starting new monitoring cycle...")
-                    random.shuffle(self.symbols)
-
-                    for symbol in self.symbols:
-                        stock_data = await self.get_stock_data(symbol)
-                        if stock_data:
-                            metrics = self.calculate_metrics(stock_data)
-                            if metrics:
-                                score, reasons = self.score_stock(metrics)
-                                if score > 5:  # Threshold for high-potential stocks
-                                    analysis = {
-                                        'symbol': symbol,
-                                        'score': score,
-                                        'reasons': reasons,
-                                        'metrics': metrics
-                                    }
-                                    self.high_potential_stocks.append(analysis)
-                                    logging.info(f"High potential stock detected: {symbol}, Score: {score}")
-                                    await self.send_discord_notification(analysis)
-                                    await self.send_slack_notification(analysis)
-
-                        logging.info(f"Processed {symbol}")
-
-                    logging.info(f"Completed monitoring cycle with {len(self.high_potential_stocks)} high-potential stocks.")
-
-                    logging.info(f"Sleeping for {self.monitor_interval} seconds before next cycle...")
-                    await asyncio.sleep(self.monitor_interval)
-
-                except Exception as e:
-                    logging.error(f"Error in monitoring loop: {str(e)}")
-                    traceback.print_exc()
-
-            logging.info("Stock monitoring stopped.")
-
-    async def send_discord_notification(self, analysis):
-        logging.info(f"Sending Discord notification for {analysis['symbol']}")
-        if not self.discord_webhook:
-            logging.warning("Discord webhook URL is not set. Skipping notification.")
-            return
-
+    def analyze(self) -> Tuple[Dict[str, Any], Dict[str, float]]:
         try:
-            async with aiohttp.ClientSession() as session:
-                webhook = Webhook.from_url(self.discord_webhook, session=session)
-                embed = {
-                    "title": f"High Potential Stock: {analysis['symbol']}",
-                    "description": f"Score: {analysis['score']}\nReasons: {', '.join(analysis['reasons'])}",
-                    "fields": [
-                        {"name": "Current Price", "value": f"${analysis['metrics']['current_price']:.2f}", "inline": True},
-                        {"name": "Potential Profit", "value": f"{analysis['metrics']['potential_profit']:.2f}%", "inline": True},
-                        {"name": "Risk-Reward Ratio", "value": f"{analysis['metrics']['risk_reward_ratio']:.2f}", "inline": True},
-                        {"name": "Conservative Exit", "value": f"${analysis['metrics']['conservative_exit']:.2f}", "inline": True},
-                        {"name": "Moderate Exit", "value": f"${analysis['metrics']['moderate_exit']:.2f}", "inline": True},
-                        {"name": "Aggressive Exit", "value": f"${analysis['metrics']['aggressive_exit']:.2f}", "inline": True},
-                        {"name": "Stop Loss", "value": f"${analysis['metrics']['stop_loss']:.2f}", "inline": True},
-                        {"name": "RSI", "value": f"{analysis['metrics']['rsi']:.2f}", "inline": True},
-                        {"name": "MACD", "value": f"{analysis['metrics']['macd']:.4f}", "inline": True}
-                    ],
-                    "color": 0x00ff00  # Green color
-                }
-                await webhook.send(embed=embed)
-                logging.info(f"Discord notification sent for {analysis['symbol']}")
-        except Exception as e:
-            logging.error(f"Error sending Discord notification: {str(e)}")
-            traceback.print_exc()
+            self.calculate_indicators()
 
-    async def send_slack_notification(self, analysis):
-        logging.info(f"Sending Slack notification for {analysis['symbol']}")
-        if not self.slack_webhook:
-            logging.warning("Slack webhook URL is not set. Skipping notification.")
-            return
+            current_price = self.close_prices.iloc[-1]
+            sma5 = self.data['SMA5'].iloc[-1]
+            sma20 = self.data['SMA20'].iloc[-1]
+            sma50 = self.data['SMA50'].iloc[-1]
+            sma200 = self.data['SMA200'].iloc[-1]
+            rsi = self.data['RSI'].iloc[-1]
+            macd = self.data['MACD'].iloc[-1]
+            macd_signal = self.data['MACD_Signal'].iloc[-1]
+            atr = self.data['ATR'].iloc[-1]
+            bb_width = self.data['BB_Width'].iloc[-1]
 
-        try:
-            message = {
-                "text": f"High Potential Stock: {analysis['symbol']}",
-                "attachments": [
-                    {
-                        "color": "#36a64f",
-                        "fields": [
-                            {"title": "Score", "value": str(analysis['score']), "short": True},
-                            {"title": "Current Price", "value": f"${analysis['metrics']['current_price']:.2f}", "short": True},
-                            {"title": "Potential Profit", "value": f"{analysis['metrics']['potential_profit']:.2f}%", "short": True},
-                            {"title": "Risk-Reward Ratio", "value": f"{analysis['metrics']['risk_reward_ratio']:.2f}", "short": True},
-                            {"title": "Conservative Exit", "value": f"${analysis['metrics']['conservative_exit']:.2f}", "short": True},
-                            {"title": "Moderate Exit", "value": f"${analysis['metrics']['moderate_exit']:.2f}", "short": True},
-                            {"title": "Aggressive Exit", "value": f"${analysis['metrics']['aggressive_exit']:.2f}", "short": True},
-                            {"title": "Stop Loss", "value": f"${analysis['metrics']['stop_loss']:.2f}", "short": True},
-                            {"title": "RSI", "value": f"{analysis['metrics']['rsi']:.2f}", "short": True},
-                            {"title": "MACD", "value": f"{analysis['metrics']['macd']:.4f}", "short": True},
-                            {"title": "Reasons", "value": ", ".join(analysis['reasons'])}
-                        ]
-                    }
-                ]
+            avg_volume = self.volumes.mean()
+            volatility = self.close_prices.pct_change().std() * np.sqrt(252)  # Annualized volatility
+
+            recent_high = self.high_prices.iloc[-20:].max()
+            recent_low = self.low_prices.iloc[-20:].min()
+
+            conservative_exit = current_price * 1.1
+            moderate_exit = current_price * 1.2
+            aggressive_exit = current_price * 1.3
+
+            potential_profit = moderate_exit - current_price
+            stop_loss = current_price - atr * 2
+            risk_reward_ratio = potential_profit / (current_price - stop_loss)
+
+            self.results = {
+                'trend': 'Bullish' if current_price > sma50 > sma200 else 'Bearish',
+                'current_price': current_price,
+                'sma5': sma5,
+                'sma20': sma20,
+                'sma50': sma50,
+                'sma200': sma200,
+                'rsi': rsi,
+                'macd': macd,
+                'macd_signal': macd_signal,
+                'atr': atr,
+                'bb_width': bb_width,
+                'avg_volume': avg_volume,
+                'volatility': volatility,
+                'recent_high': recent_high,
+                'recent_low': recent_low,
+                'fifty_two_week_high': self.info.get('fiftyTwoWeekHigh'),
+                'fifty_two_week_low': self.info.get('fiftyTwoWeekLow'),
+                'conservative_exit': conservative_exit,
+                'moderate_exit': moderate_exit,
+                'aggressive_exit': aggressive_exit,
+                'potential_profit': potential_profit,
+                'risk_reward_ratio': risk_reward_ratio,
+                'stop_loss': stop_loss
             }
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.slack_webhook, json=message) as response:
-                    if response.status == 200:
-                        logging.info(f"Slack notification sent for {analysis['symbol']}")
-                    else:
-                        logging.error(f"Failed to send Slack notification: HTTP {response.status}")
+
+            self.score_components = {
+                'trend': 10 if current_price > sma50 > sma200 else -10,
+                'rsi': 5 if 40 < rsi < 60 else (-5 if rsi > 70 or rsi < 30 else 0),
+                'macd': 5 if macd > macd_signal else -5,
+                'volatility': -5 if volatility > 0.3 else (5 if volatility < 0.2 else 0),
+                'risk_reward': 10 if risk_reward_ratio > 3 else (5 if risk_reward_ratio > 2 else 0)
+            }
+
+            return self.results, self.score_components
         except Exception as e:
-            logging.error(f"Error sending Slack notification: {str(e)}")
-            traceback.print_exc()
+            print(f"Error in technical analysis: {str(e)}")
+            raise
 
-# Main execution
-if __name__ == "__main__":
-    logging.info("Script started")
-    monitor = StockMonitor()
+class FundamentalAnalyzer(Analyzer):
+    def analyze(self) -> Tuple[Dict[str, Any], Dict[str, float]]:
+        try:
+            self.results = {
+                'pe_ratio': self.info.get('trailingPE'),
+                'forward_pe': self.info.get('forwardPE'),
+                'peg_ratio': self.info.get('pegRatio'),
+                'price_to_book': self.info.get('priceToBook'),
+                'debt_to_equity': self.info.get('debtToEquity'),
+                'current_ratio': self.info.get('currentRatio'),
+                'profit_margin': self.info.get('profitMargin'),
+                'return_on_equity': self.info.get('returnOnEquity'),
+                'revenue_growth': self.info.get('revenueGrowth'),
+                'eps': self.info.get('trailingEps'),
+                'free_cash_flow': self.info.get('freeCashflow')
+            }
+
+            self.score_components = {
+                'pe_ratio': 10 if self.results['pe_ratio'] and self.results['pe_ratio'] < 20 else (-10 if self.results['pe_ratio'] and self.results['pe_ratio'] > 50 else 0),
+                'peg_ratio': 10 if self.results['peg_ratio'] and self.results['peg_ratio'] < 1 else (-10 if self.results['peg_ratio'] and self.results['peg_ratio'] > 2 else 0),
+                'price_to_book': 5 if self.results['price_to_book'] and self.results['price_to_book'] < 3 else (-5 if self.results['price_to_book'] and self.results['price_to_book'] > 5 else 0),
+                'debt_to_equity': 5 if self.results['debt_to_equity'] and self.results['debt_to_equity'] < 1 else (-5 if self.results['debt_to_equity'] and self.results['debt_to_equity'] > 2 else 0),
+                'current_ratio': 5 if self.results['current_ratio'] and self.results['current_ratio'] > 1.5 else (-5 if self.results['current_ratio'] and self.results['current_ratio'] < 1 else 0),
+                'profit_margin': 10 if self.results['profit_margin'] and self.results['profit_margin'] > 0.2 else (-10 if self.results['profit_margin'] and self.results['profit_margin'] < 0 else 0),
+                'return_on_equity': 10 if self.results['return_on_equity'] and self.results['return_on_equity'] > 0.15 else (-10 if self.results['return_on_equity'] and self.results['return_on_equity'] < 0 else 0),
+                'revenue_growth': 10 if self.results['revenue_growth'] and self.results['revenue_growth'] > 0.1 else (-10 if self.results['revenue_growth'] and self.results['revenue_growth'] < 0 else 0)
+            }
+
+            return self.results, self.score_components
+        except Exception as e:
+            print(f"Error in fundamental analysis: {str(e)}")
+            raise
+
+class NewsSentimentAnalyzer(Analyzer):
+    def analyze(self) -> Tuple[Dict[str, Any], Dict[str, float]]:
+        try:
+            symbol = self.info['symbol']
+            news_sentiment = self.get_news_sentiment(symbol)
+
+            total_sentiment = sum(news_sentiment.values())
+            if total_sentiment > 0:
+                sentiment_score = (news_sentiment['positive'] - news_sentiment['negative']) / total_sentiment
+            else:
+                sentiment_score = 0
+
+            self.results = {
+                'news_sentiment': news_sentiment,
+                'sentiment_score': sentiment_score
+            }
+
+            self.score_components = {
+                'news_sentiment': 10 * sentiment_score  # Scale from -10 to 10
+            }
+
+            return self.results, self.score_components
+        except Exception as e:
+            print(f"Error in news sentiment analysis: {str(e)}")
+            raise
+
+    def get_news_sentiment(self, symbol: str) -> Dict[str, int]:
+        url = f"https://finviz.com/quote.ashx?t={symbol}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        try:
+            response = requests.get(url, headers=headers)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            news_table = soup.find(id='news-table')
+            news_sentiment = {
+                "positive": 0,
+                "neutral": 0,
+                "negative": 0
+            }
+            if news_table:
+                for row in news_table.find_all('tr'):
+                    headline = row.find_all('td')[1].get_text().lower()
+                    if any(word in headline for word in ["upgraded", "outperform", "buy", "bullish"]):
+                        news_sentiment["positive"] += 1
+                    elif any(word in headline for word in ["downgraded", "underperform", "sell", "bearish"]):
+                        news_sentiment["negative"] += 1
+                    else:
+                        news_sentiment["neutral"] += 1
+            return news_sentiment
+        except Exception as e:
+            print(f"Error fetching news for {symbol}: {str(e)}")
+            return {"positive": 0, "neutral": 0, "negative": 0}
+
+class AdvancedStockAnalyzer:
+    def __init__(self, ticker: str):
+        self.ticker = ticker.upper()
+        self.stock = yf.Ticker(self.ticker)
+        self.data = self.stock.history(period="2y")
+        self.info = self.stock.info
+        self.sector = self.info.get('sector', 'Unknown')
+        self.analysis_results: Dict[str, Any] = {}
+        self.score_components: Dict[str, float] = {}
+        self.weights = self.get_sector_weights()
+
+    def get_sector_weights(self) -> Dict[str, float]:
+        sector_weights = {
+            'Technology': {
+                'technical': 1.2, 'fundamental': 1.1, 'news_sentiment': 1.0
+            },
+            'Healthcare': {
+                'technical': 0.9, 'fundamental': 1.2, 'news_sentiment': 1.0
+            },
+            'Financials': {
+                'technical': 1.0, 'fundamental': 1.3, 'news_sentiment': 1.1
+            },
+            'Consumer Cyclical': {
+                'technical': 1.1, 'fundamental': 1.0, 'news_sentiment': 1.2
+            },
+            'Consumer Defensive': {
+                'technical': 0.8, 'fundamental': 1.1, 'news_sentiment': 0.9
+            },
+            'Energy': {
+                'technical': 1.2, 'fundamental': 1.0, 'news_sentiment': 1.1
+            },
+            'Utilities': {
+                'technical': 0.7, 'fundamental': 1.2, 'news_sentiment': 0.8
+            },
+            'Real Estate': {
+                'technical': 0.9, 'fundamental': 1.3, 'news_sentiment': 0.9
+            },
+            'Industrials': {
+                'technical': 1.1, 'fundamental': 1.1, 'news_sentiment': 1.0
+            },
+            'Basic Materials': {
+                'technical': 1.2, 'fundamental': 1.0, 'news_sentiment': 1.1
+            },
+            'Communication Services': {
+                'technical': 1.1, 'fundamental': 1.1, 'news_sentiment': 1.2
+            },
+            'Unknown': {
+                'technical': 1.0, 'fundamental': 1.0, 'news_sentiment': 1.0
+            }
+        }
+        return sector_weights.get(self.sector, sector_weights['Unknown'])
+
+    def run_analysis(self) -> Dict[str, Any]:
+        try:
+            analyzers: List[Analyzer] = [
+                TechnicalAnalyzer(self.data, self.info),
+                FundamentalAnalyzer(self.data, self.info),
+                NewsSentimentAnalyzer(self.data, self.info)
+            ]
+
+            for analyzer in analyzers:
+                results, scores = analyzer.analyze()
+                self.analysis_results.update(results)
+                analyzer_type = analyzer.__class__.__name__.lower().replace('analyzer', '')
+                self.score_components.update({k: v * self.weights.get(analyzer_type, 1.0) for k, v in scores.items()})
+
+            overall_score = self.calculate_overall_score()
+            recommendation, timeframe = self.get_recommendation(overall_score)
+
+            self.analysis_results['overall'] = {
+                'score': overall_score,
+                'recommendation': recommendation,
+                'suggested_timeframe': timeframe,
+                'score_components': self.score_components,
+                'sector': self.sector,
+                'weights': self.weights
+            }
+
+            return self.analysis_results
+        except Exception as e:
+            print(f"Error in running analysis: {str(e)}")
+            raise
+
+    def calculate_overall_score(self) -> float:
+        total_score = sum(self.score_components.values())
+        max_possible_score = sum(abs(score) for score in self.score_components.values())
+        normalized_score = (total_score + max_possible_score) / (2 * max_possible_score) * 100
+        return max(0, min(100, normalized_score))
+
+    def get_recommendation(self, score: float) -> Tuple[str, str]:
+        if score >= 80:
+            return "Strong Buy", "Long-term (1 year or more)"
+        elif score >= 60:
+            return "Buy", "Medium-term (6-12 months)"
+        elif score >= 40:
+            return "Hold", "Short-term (3-6 months)"
+        elif score >= 20:
+            return "Sell", "Consider selling"
+        else:
+            return "Strong Sell", "Recommend immediate sale"
+
+    def plot_technical_indicators(self) -> None:
+        try:
+            fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 18), sharex=True)
+
+            # Price and SMAs
+            ax1.plot(self.data.index, self.data['Close'], label='Price')
+            ax1.plot(self.data.index, self.data['SMA5'], label='SMA 5')
+            ax1.plot(self.data.index, self.data['SMA20'], label='SMA 20')
+            ax1.plot(self.data.index, self.data['SMA50'], label='SMA 50')
+            ax1.plot(self.data.index, self.data['SMA200'], label='SMA 200')
+            ax1.set_title(f"{self.ticker} Price and Moving Averages")
+            ax1.set_ylabel("Price")
+            ax1.legend()
+
+            # RSI
+            ax2.plot(self.data.index, self.data['RSI'], label='RSI')
+            ax2.axhline(y=70, color='r', linestyle='--')
+            ax2.axhline(y=30, color='g', linestyle='--')
+            ax2.set_title("Relative Strength Index (RSI)")
+            ax2.set_ylabel("RSI")
+            ax2.legend()
+
+            # MACD
+            ax3.plot(self.data.index, self.data['MACD'], label='MACD')
+            ax3.plot(self.data.index, self.data['MACD_Signal'], label='Signal Line')
+            ax3.set_title("Moving Average Convergence Divergence (MACD)")
+            ax3.set_ylabel("MACD")
+            ax3.legend()
+
+            plt.tight_layout()
+            plt.show()
+        except Exception as e:
+            print(f"Error in plotting technical indicators: {str(e)}")
+
+    def get_summary(self) -> str:
+        overall = self.analysis_results['overall']
+        technical = self.analysis_results
+        return (f"Overall Score: {overall['score']:.2f}/100, "
+                f"Recommendation: {overall['recommendation']}, "
+                f"Suggested Action: {overall['suggested_timeframe']}, "
+                f"Conservative Exit: {technical['conservative_exit']:.2f}, "
+                f"Moderate Exit: {technical['moderate_exit']:.2f}, "
+                f"Aggressive Exit: {technical['aggressive_exit']:.2f}")
+
+def analyze_stock(ticker: str, summary: bool = False) -> None:
     try:
-        asyncio.run(monitor.monitor_stocks())
-    except KeyboardInterrupt:
-        logging.info("\nMonitoring stopped by user.")
+        analyzer = AdvancedStockAnalyzer(ticker)
+        result = analyzer.run_analysis()
+
+        if summary:
+            print(analyzer.get_summary())
+        else:
+            print(f"Analysis for {ticker.upper()} (${result['current_price']:.2f})")
+            print(f"Sector: {result['overall']['sector']}")
+            print(f"\nOverall Score: {result['overall']['score']:.2f}/100")
+            print(f"Recommendation: {result['overall']['recommendation']}")
+            print(f"Suggested Action: {result['overall']['suggested_timeframe']}")
+
+            print("\nTechnical Indicators:")
+            for key, value in result.items():
+                if key not in ['overall', 'news_sentiment']:
+                    if isinstance(value, float):
+                        print(f"{key.replace('_', ' ').title()}: {value:.2f}")
+                    else:
+                        print(f"{key.replace('_', ' ').title()}: {value}")
+
+            print("\nFundamental Indicators:")
+            for key, value in result.get('fundamental', {}).items():
+                if isinstance(value, float):
+                    print(f"{key.replace('_', ' ').title()}: {value:.2f}")
+                elif value is not None:
+                    print(f"{key.replace('_', ' ').title()}: {value}")
+                else:
+                    print(f"{key.replace('_', ' ').title()}: N/A")
+
+            print("\nNews Sentiment:")
+            sentiment = result.get('news_sentiment', {})
+            print(f"Sentiment Score: {sentiment.get('sentiment_score', 'N/A')}")
+            print(f"Positive News: {sentiment.get('news_sentiment', {}).get('positive', 'N/A')}")
+            print(f"Neutral News: {sentiment.get('news_sentiment', {}).get('neutral', 'N/A')}")
+            print(f"Negative News: {sentiment.get('news_sentiment', {}).get('negative', 'N/A')}")
+
+            print("\nScore Components:")
+            for component, score in result['overall']['score_components'].items():
+                print(f"{component.replace('_', ' ').title()}: {score:.2f}")
+
+            analyzer.plot_technical_indicators()
+
+            print("\nNote: This analysis is for informational purposes only and should not be considered as financial advice.")
     except Exception as e:
-        logging.error(f"An unexpected error occurred: {str(e)}")
-        traceback.print_exc()
-    finally:
-        logging.info("Stock monitoring has been stopped and cleaned up.")
+        print(f"Error in analyzing stock: {str(e)}")
 
-    # Print summary of high potential stocks
-    if monitor.high_potential_stocks:
-        logging.info("\nHigh Potential Stocks Summary:")
-        for stock in monitor.high_potential_stocks:
-            logging.info(f"\nSymbol: {stock['symbol']}")
-            logging.info(f"Score: {stock['score']}")
-            logging.info(f"Current Price: ${stock['metrics']['current_price']:.2f}")
-            logging.info(f"Potential Profit: {stock['metrics']['potential_profit']:.2f}%")
-            logging.info(f"Risk-Reward Ratio: {stock['metrics']['risk_reward_ratio']:.2f}")
-            logging.info(f"Conservative Exit: ${stock['metrics']['conservative_exit']:.2f}")
-            logging.info(f"Moderate Exit: ${stock['metrics']['moderate_exit']:.2f}")
-            logging.info(f"Aggressive Exit: ${stock['metrics']['aggressive_exit']:.2f}")
-            logging.info(f"Stop Loss: ${stock['metrics']['stop_loss']:.2f}")
-            logging.info("Reasons:")
-            for reason in stock['reasons']:
-                logging.info(f"- {reason}")
-    else:
-        logging.info("\nNo high potential stocks were found during this run.")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Stock Analysis Tool")
+    parser.add_argument("ticker", type=str, help="Stock ticker symbol")
+    parser.add_argument("-s", "--summary", action="store_true", help="Display summary output")
+    args = parser.parse_args()
 
-    logging.info("Script execution completed.")
+    analyze_stock(args.ticker, args.summary)
