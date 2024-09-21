@@ -278,7 +278,21 @@ class AdvancedStockAnalyzer:
     def __init__(self, ticker: str):
         self.ticker = ticker.upper()
         self.stock = yf.Ticker(self.ticker)
-        self.data = self.stock.history(period="2y")
+        
+        try:
+            self.data = self.stock.history(period="2y")
+        except ValueError as e:
+            print(f"{self.ticker}: {str(e)}")
+            try:
+                self.data = self.stock.history(period="5d")
+                print(f"Using '5d' period instead for {self.ticker}")
+            except ValueError as e:
+                print(f"{self.ticker}: {str(e)}")
+                self.data = None
+        
+        if self.data is None or self.data.empty:
+            raise ValueError(f"No stock data available for {self.ticker}")
+        
         self.info = self.stock.info
         self.sector = self.info.get('sector', 'Unknown')
         self.analysis_results: Dict[str, Any] = {}
