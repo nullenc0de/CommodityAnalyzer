@@ -199,6 +199,15 @@ class NewsSentimentAnalyzer(Analyzer):
             symbol = self.info['symbol']
             news_sentiment = self.get_news_sentiment(symbol)
             
+            if 'error' in news_sentiment:
+                self.results = {
+                    'news_sentiment': {},
+                    'sentiment_score': 'N/A',
+                    'sentiment_label': 'N/A'
+                }
+                self.score_components = {'news_sentiment': 0}
+                return self.results, self.score_components
+            
             if news_sentiment:
                 sentiment_score = news_sentiment['average_score']
                 sentiment_label = news_sentiment['average_label']
@@ -221,8 +230,8 @@ class NewsSentimentAnalyzer(Analyzer):
             print(f"Error in news sentiment analysis: {str(e)}")
             self.results = {
                 'news_sentiment': {},
-                'sentiment_score': 0,
-                'sentiment_label': "Error"
+                'sentiment_score': 'N/A',
+                'sentiment_label': 'N/A'
             }
             self.score_components = {'news_sentiment': 0}
             return self.results, self.score_components
@@ -233,6 +242,10 @@ class NewsSentimentAnalyzer(Analyzer):
             response = requests.get(url)
             data = response.json()
             
+            if 'Information' in data:
+                print(f"API rate limit exceeded for {symbol}. Please subscribe to a premium plan or try again later.")
+                return {'error': 'API rate limit exceeded'}
+
             if 'feed' not in data:
                 print(f"No news data found for {symbol}. API response: {data}")
                 return {}
@@ -400,12 +413,10 @@ class AdvancedStockAnalyzer:
     def get_summary(self) -> str:
         overall = self.analysis_results['overall']
         technical = self.analysis_results
-        return (f"Overall Score: {overall['score']:.2f}/100, "
-                f"Recommendation: {overall['recommendation']}, "
-                f"Suggested Action: {overall['suggested_timeframe']}, "
-                f"Conservative Exit: {technical['conservative_exit']:.2f}, "
-                f"Moderate Exit: {technical['moderate_exit']:.2f}, "
-                f"Aggressive Exit: {technical['aggressive_exit']:.2f}")
+        
+        summary = f"{self.ticker} | Price: ${technical['current_price']:.2f} | Score: {overall['score']:.2f}/100 | Rec: {overall['recommendation']} | Action: {overall['suggested_timeframe']} | Trend: {technical['trend']} | Exits: Conservative ${technical['conservative_exit']:.2f}, Moderate ${technical['moderate_exit']:.2f}, Aggressive ${technical['aggressive_exit']:.2f}"
+        
+        return summary
 
 def analyze_stock(ticker: str, summary: bool = False) -> None:
     try:
