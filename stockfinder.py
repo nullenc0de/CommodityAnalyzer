@@ -1,4 +1,5 @@
 import warnings
+import statistics
 import os
 import yfinance as yf
 import pandas as pd
@@ -286,88 +287,7 @@ class NewsSentimentAnalyzer(Analyzer):
         except Exception as e:
             return {'error': f"Error fetching news for {symbol}: {str(e)}"}
 
-class NewsSentimentAnalyzer(Analyzer):
-    def __init__(self, data: pd.DataFrame, info: Dict[str, Any]):
-        super().__init__(data, info)
-        self.api_key = "THUTRZX4CJ4MC33O"  # Replace with your actual API key
-
-    def analyze(self) -> Tuple[Dict[str, Any], Dict[str, float]]:
-        try:
-            symbol = self.info['symbol']
-            news_sentiment = self.get_news_sentiment(symbol)
-            
-            if 'error' in news_sentiment:
-                self.results = {
-                    'news_sentiment': {},
-                    'sentiment_score': 'N/A',
-                    'sentiment_label': 'N/A',
-                    'error': news_sentiment['error']
-                }
-                self.score_components = {'news_sentiment': 0}
-                return self.results, self.score_components
-            
-            if news_sentiment:
-                sentiment_score = news_sentiment['average_score']
-                sentiment_label = news_sentiment['average_label']
-            else:
-                sentiment_score = 0
-                sentiment_label = "Neutral"
-
-            self.results = {
-                'news_sentiment': news_sentiment,
-                'sentiment_score': sentiment_score,
-                'sentiment_label': sentiment_label
-            }
-
-            self.score_components = {
-                'news_sentiment': 10 * (sentiment_score - 0.5)  # Scale from -5 to 5
-            }
-
-            return self.results, self.score_components
-        except Exception as e:
-            print(f"Error in news sentiment analysis: {str(e)}")
-            self.results = {
-                'news_sentiment': {},
-                'sentiment_score': 'N/A',
-                'sentiment_label': 'N/A',
-                'error': str(e)
-            }
-            self.score_components = {'news_sentiment': 0}
-            return self.results, self.score_components
-
-    def get_news_sentiment(self, symbol: str) -> Dict[str, Any]:
-        try:
-            url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={symbol}&apikey={self.api_key}"
-            response = requests.get(url)
-            data = response.json()
-            
-            if 'Information' in data:
-                return {'error': f"API rate limit exceeded for {symbol}. Unable to retrieve news sentiment."}
-
-            if 'feed' not in data:
-                return {'error': f"No news data found for {symbol}. API response: {data}"}
-
-            feed = data['feed']
-            sentiment_scores = []
-            sentiment_labels = []
-            
-            for item in feed:
-                sentiment_scores.append(float(item['overall_sentiment_score']))
-                sentiment_labels.append(item['overall_sentiment_label'])
-            
-            if not sentiment_scores:
-                return {'error': f"No sentiment scores found for {symbol}"}
-
-            average_score = sum(sentiment_scores) / len(sentiment_scores)
-            average_label = max(set(sentiment_labels), key=sentiment_labels.count)
-            
-            return {
-                'average_score': average_score,
-                'average_label': average_label,
-                'items': [{'title': item['title'], 'sentiment_score': item['overall_sentiment_score'], 'sentiment_label': item['overall_sentiment_label']} for item in feed[:5]]  # Include top 5 news items
-            }
-        except Exception as e:
-            return {'error': f"Error fetching news for {symbol}: {str(e)}"}
+import statistics
 
 class AdvancedStockAnalyzer:
     def __init__(self, ticker: str):
@@ -450,12 +370,24 @@ class AdvancedStockAnalyzer:
         if total_weight == 0:
             return 50  # Neutral score if no data available
 
-        normalized_score = (total_score / total_weight + 10) * 5  # Scale from 0-100
+        # Calculate the average score
+        avg_score = total_score / total_weight
+
+        # Apply penalties for critical negative factors
+        if self.score_components.get('revenue_growth', 0) < -5:
+            avg_score *= 0.8  # 20% penalty for significant negative revenue growth
+        if self.score_components.get('debt_to_equity', 0) < -5:
+            avg_score *= 0.9  # 10% penalty for high debt
+        if self.score_components.get('current_ratio', 0) < -5:
+            avg_score *= 0.9  # 10% penalty for low current ratio
+
+        # Scale to 0-100
+        normalized_score = (avg_score + 10) * 5
         
         # Apply liquidity penalty
         liquidity_score = self.score_components.get('liquidity', 10)
         liquidity_penalty = max(0, (5 - liquidity_score) / 5)  # 0 to 1 penalty
-        normalized_score *= (1 - liquidity_penalty)
+        normalized_score *= (1 - liquidity_penalty * 0.5)  # Reduce the impact of liquidity penalty
 
         return max(0, min(100, normalized_score))
 
@@ -465,26 +397,39 @@ class AdvancedStockAnalyzer:
 
         if avg_volume < 10000:  # Adjust threshold as needed
             return "Caution", "Low trading volume, may be illiquid"
-    
-        if price_volatility < 0.01:  # Adjust threshold as needed
-            return "Neutral", "Low price volatility, stable security"
+        
+        if price_volatility > 0.03:  # 3% daily volatility
+            return "Caution", "High volatility, increased risk"
 
-        if score >= 90:
+        if self.score_components.get('revenue_growth', 0) < -5:
+            return "Caution", "Negative revenue growth"
+
+        if score >= 80:
             return "Strong Buy", "Long-term (1 year or more)"
-        elif score >= 70:
+        elif score >= 60:
             return "Buy", "Medium-term (6-12 months)"
-        elif score >= 50:
+        elif score >= 40:
             return "Hold", "Short-term (3-6 months)"
-        elif score >= 30:
+        elif score >= 20:
             return "Sell", "Consider selling"
         else:
             return "Strong Sell", "Recommend immediate sale"
 
     def calculate_confidence_level(self) -> float:
         data_completeness = sum(1 for v in self.analysis_results.values() if v is not None) / len(self.analysis_results)
-        signal_consistency = 1 - (max(self.score_components.values()) - min(self.score_components.values())) / 20
-        recommendation_alignment = 1 if self.analysis_results['overall']['score'] >= 70 and self.analysis_results['overall']['recommendation'] in ['Strong Buy', 'Buy'] else 0.5
-        return (data_completeness + signal_consistency + recommendation_alignment) * 10/3  # Scale to 0-10
+        
+        # Calculate the standard deviation of score components
+        scores = list(self.score_components.values())
+        score_std = statistics.stdev(scores) if len(scores) > 1 else 0
+        signal_consistency = 1 - (score_std / 10)  # Normalize to 0-1 range
+        
+        overall_score = self.analysis_results['overall']['score']
+        score_factor = overall_score / 100
+
+        recommendation_alignment = 1 if overall_score >= 60 and self.analysis_results['overall']['recommendation'] in ['Strong Buy', 'Buy'] else 0.5
+
+        confidence = (data_completeness + signal_consistency + recommendation_alignment) * score_factor * 10/3
+        return max(0, min(10, confidence))  # Ensure the confidence is between 0 and 10
 
     def get_summary(self) -> str:
         overall = self.analysis_results['overall']
@@ -494,36 +439,29 @@ class AdvancedStockAnalyzer:
         summary = (f"{self.ticker} | Price: ${technical['current_price']:.2f} | "
                    f"Score: {overall['score']:.2f}/100 | Rec: {overall['recommendation']} | "
                    f"Action: {overall['suggested_timeframe']} | Trend: {technical['trend']} | "
-                   f"Exits: Conservative ${technical['conservative_exit']:.2f}, "
-                   f"Moderate ${technical['moderate_exit']:.2f}, "
-                   f"Aggressive ${technical['aggressive_exit']:.2f} | "
                    f"Confidence: {confidence:.2f}/10")
         
         if technical['trend'] == 'Bullish' and overall['recommendation'] in ['Sell', 'Strong Sell']:
             summary += " | Note: Bullish trend but other factors suggest caution"
         
-        if overall['score'] == 50:
-            summary += " | Warning: Limited data available"
-        
-        if overall['recommendation'] == "Caution":
-            summary += f" | Caution: {overall['suggested_timeframe']}. This may affect the reliability of the analysis."
+        if overall['score'] < 40:
+            summary += " | Warning: Low overall score, high risk"
         
         if self.is_etf:
             etf_info = self.analysis_results
             summary += f" | ETF Expense Ratio: {etf_info.get('expense_ratio', 'N/A')}"
-            summary += f" | AUM: ${etf_info.get('assets_under_management', 0)/1e6:.2f}M"
         
         avg_volume = technical.get('avg_volume', 0)
-        if avg_volume < 10000:
-            summary += f" | Low Volume: {avg_volume:.0f} (< 10,000)"
+        if avg_volume < 100000:
+            summary += f" | Low Volume: {avg_volume:.0f}"
         
         volatility = technical.get('volatility', 0)
-        summary += f" | Volatility: {volatility:.2f}"
+        if volatility > 0.03:
+            summary += f" | High Volatility: {volatility:.2f}"
         
-        summary += f" | Liquidity Score: {self.score_components.get('liquidity', 0):.2f}/10"
-        
-        if any(score < 0 for score in self.score_components.values()):
-            summary += " | Warning: Some negative indicators present"
+        negative_factors = [k for k, v in self.score_components.items() if v < -5]
+        if negative_factors:
+            summary += f" | Warning: Negative indicators in {', '.join(negative_factors)}"
 
         return summary
 
