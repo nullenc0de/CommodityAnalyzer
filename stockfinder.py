@@ -285,16 +285,8 @@ class NewsSentimentAnalyzer(Analyzer):
         except Exception as e:
             return {'error': f"Error fetching news for {symbol}: {str(e)}"}
 
-import statistics
-
-import statistics
 from typing import Dict, Tuple, List, Any
-
 import statistics
-from typing import Dict, Tuple, List, Any
-
-import statistics
-from typing import Dict, Tuple, List, Any
 import yfinance as yf
 import matplotlib.pyplot as plt
 import requests
@@ -302,7 +294,18 @@ from bs4 import BeautifulSoup
 import nltk
 from nltk.sentiment import SentimentIntensityAnalyzer
 
+# Download the 'vader_lexicon' required for sentiment analysis
 nltk.download('vader_lexicon', quiet=True)
+
+import statistics
+from typing import Dict, Tuple, List, Any
+import yfinance as yf
+import matplotlib.pyplot as plt
+
+import statistics
+from typing import Dict, Tuple, List, Any
+import yfinance as yf
+import matplotlib.pyplot as plt
 
 import statistics
 from typing import Dict, Tuple, List, Any
@@ -367,20 +370,27 @@ class AdvancedStockAnalyzer:
                 self.score_components.update({k: v * self.weights.get(analyzer_type, 1.0) for k, v in scores.items()})
 
             overall_score = self.calculate_overall_score()
-            recommendation, timeframe = self.get_recommendation(overall_score)
+            confidence = self.calculate_confidence_level()
+            adjusted_score = overall_score * (confidence / 10)
+            recommendation, timeframe = self.get_recommendation(adjusted_score, confidence)
 
-            self.analysis_results['overall'] = {
+            overall_results = {
                 'score': overall_score,
+                'adjusted_score': adjusted_score,
                 'recommendation': recommendation,
                 'suggested_timeframe': timeframe,
                 'score_components': self.score_components,
                 'sector': self.sector,
-                'weights': self.weights
+                'weights': self.weights,
+                'confidence': confidence
             }
 
+            self.analysis_results['overall'] = overall_results
             return self.analysis_results
         except Exception as e:
             print(f"Error in running analysis: {str(e)}")
+            print("Analysis results:", self.analysis_results)
+            print("Score components:", self.score_components)
             raise
 
     def calculate_overall_score(self) -> float:
@@ -392,49 +402,37 @@ class AdvancedStockAnalyzer:
 
         avg_score = total_score / total_weight
 
-        # Apply stronger penalties for negative factors
+        # Apply stronger penalties for negative and neutral factors
         negative_count = sum(1 for score in self.score_components.values() if score < 0)
-        avg_score *= (1 - 0.1 * negative_count)  # 10% penalty for each negative factor
+        neutral_count = sum(1 for score in self.score_components.values() if score == 0)
+        avg_score *= (1 - 0.2 * negative_count - 0.1 * neutral_count)
 
-        # Apply stronger volatility penalty
+        # Apply volatility penalty
         volatility = self.analysis_results.get('volatility', 0)
-        if volatility > 0.2:  # Start penalizing at 20% volatility
+        if volatility > 0.2:
             avg_score *= (1 - (volatility - 0.2))
 
-        # Apply stronger liquidity penalty
+        # Apply liquidity penalty
         avg_volume = self.analysis_results.get('avg_volume', 0)
         if avg_volume < 500000:
-            avg_score *= (avg_volume / 500000)  # Progressive penalty
-
-        # Penalize for extremely high debt-to-equity ratio
-        debt_to_equity = self.analysis_results.get('debt_to_equity', 0)
-        if debt_to_equity > 200:
-            avg_score *= 0.8  # 20% penalty for very high debt
+            avg_score *= (avg_volume / 500000)
 
         # Scale to 0-100
-        normalized_score = (avg_score + 10) * 5
+        normalized_score = avg_score * 10
         
         return max(0, min(100, normalized_score))
 
-    def get_recommendation(self, score: float) -> Tuple[str, str]:
-        volatility = self.analysis_results.get('volatility', 0)
-        avg_volume = self.analysis_results.get('avg_volume', 0)
-        debt_to_equity = self.analysis_results.get('debt_to_equity', 0)
-
-        if volatility > 0.4:
-            return "High Risk", "High volatility, increased risk"
-        if avg_volume < 100000:
-            return "Caution", "Low trading volume, may be illiquid"
-        if debt_to_equity > 200:
-            return "Caution", "High debt levels, increased financial risk"
-
-        if score >= 80:
+    def get_recommendation(self, adjusted_score: float, confidence: float) -> Tuple[str, str]:
+        if confidence < 5:
+            return "Uncertain", "Low confidence in analysis, more research needed"
+        
+        if adjusted_score >= 80:
             return "Strong Buy", "Long-term (1 year or more)"
-        elif score >= 60:
+        elif adjusted_score >= 60:
             return "Buy", "Medium-term (6-12 months)"
-        elif score >= 40:
+        elif adjusted_score >= 40:
             return "Hold", "Short-term (3-6 months)"
-        elif score >= 20:
+        elif adjusted_score >= 20:
             return "Sell", "Consider selling"
         else:
             return "Strong Sell", "Recommend immediate sale"
@@ -446,27 +444,33 @@ class AdvancedStockAnalyzer:
         score_std = statistics.stdev(scores) if len(scores) > 1 else 0
         signal_consistency = 1 - (score_std / 10)
         
-        overall_score = self.analysis_results['overall']['score']
-        score_factor = overall_score / 100
-
         negative_factors = sum(1 for score in scores if score < 0)
-        negative_penalty = 0.1 * negative_factors
+        neutral_factors = sum(1 for score in self.score_components.values() if score == 0)
+        factor_penalty = 0.1 * negative_factors + 0.05 * neutral_factors
 
         volatility = self.analysis_results.get('volatility', 0)
         volatility_penalty = max(0, (volatility - 0.2) / 0.8)  # Penalty starts at 20% volatility
 
-        confidence = (data_completeness + signal_consistency) * score_factor * 5
-        confidence *= (1 - negative_penalty) * (1 - volatility_penalty)
+        missing_data_penalty = 0.2 * sum(1 for v in self.analysis_results.values() if v is None or v == 'N/A') / len(self.analysis_results)
+
+        confidence = (data_completeness + signal_consistency) * 5
+        confidence *= (1 - factor_penalty) * (1 - volatility_penalty) * (1 - missing_data_penalty)
 
         return max(0, min(10, confidence))
 
     def get_summary(self) -> str:
+        if 'overall' not in self.analysis_results:
+            return f"Error: Unable to generate summary for {self.ticker}. Analysis incomplete."
+
         overall = self.analysis_results['overall']
         technical = self.analysis_results
-        confidence = self.calculate_confidence_level()
+        confidence = overall['confidence']
+        score = overall['score']
+        adjusted_score = overall['adjusted_score']
         
         summary = (f"{self.ticker} | Price: ${technical['current_price']:.2f} | "
-                   f"Score: {overall['score']:.2f}/100 | Rec: {overall['recommendation']} | "
+                   f"Score: {score:.2f}/100 | Adjusted Score: {adjusted_score:.2f}/100 | "
+                   f"Rec: {overall['recommendation']} | "
                    f"Action: {overall['suggested_timeframe']} | Trend: {technical['trend']} | "
                    f"Confidence: {confidence:.2f}/10")
         
