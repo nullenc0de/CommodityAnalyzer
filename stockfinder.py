@@ -274,6 +274,7 @@ class AdvancedStockAnalyzer:
         self.analysis_results: Dict[str, Any] = {}
         self.score_components: Dict[str, float] = {}
         self.weights = self.get_sector_weights()
+        self.risk_score = 0
 
     def get_sector_weights(self) -> Dict[str, float]:
         sector_weights = {
@@ -307,11 +308,11 @@ class AdvancedStockAnalyzer:
                 self.score_components.update({k: v * self.weights.get(analyzer_type, 1.0) for k, v in scores.items()})
             except Exception as e:
                 print(f"Error in {analyzer.__class__.__name__}: {str(e)}")
-                # You might want to set default values or skip this analyzer
 
         overall_score = self.calculate_overall_score()
+        risk_assessment = self.assess_risk()
         confidence = self.calculate_confidence_level()
-        recommendation, timeframe = self.get_recommendation(overall_score, confidence)
+        recommendation, timeframe = self.get_recommendation(overall_score, confidence, risk_assessment)
 
         overall_results = {
             'score': overall_score,
@@ -320,13 +321,12 @@ class AdvancedStockAnalyzer:
             'score_components': self.score_components,
             'sector': self.sector,
             'weights': self.weights,
-            'confidence': confidence
+            'confidence': confidence,
+            'risk_assessment': risk_assessment
         }
 
         self.analysis_results['overall'] = overall_results
         return self.analysis_results
-		
-# Part 2 of the AdvancedStockAnalyzer class
 
     def calculate_overall_score(self) -> float:
         total_weight = sum(self.weights.values())
@@ -337,10 +337,31 @@ class AdvancedStockAnalyzer:
         
         avg_score = total_score / total_weight
         
-        # Scale to 10-90 range
-        normalized_score = 10 + (avg_score + 10) * 4
+        # Scale to 0-100 range
+        normalized_score = max(0, min(100, 50 + avg_score * 2.5))
         
-        return max(10, min(90, normalized_score))
+        return normalized_score
+
+    def assess_risk(self) -> str:
+        volatility = self.analysis_results.get('volatility', 0)
+        beta = self.info.get('beta', 1)
+        debt_to_equity = self.analysis_results.get('debt_to_equity', 0)
+        current_ratio = self.analysis_results.get('current_ratio', 1)
+
+        risk_score = 0
+        risk_score += 2 if volatility > 0.4 else (1 if volatility > 0.2 else 0)
+        risk_score += 2 if beta > 1.5 else (1 if beta > 1 else 0)
+        risk_score += 2 if debt_to_equity > 2 else (1 if debt_to_equity > 1 else 0)
+        risk_score += 1 if current_ratio < 1 else 0
+
+        self.risk_score = risk_score
+
+        if risk_score >= 6:
+            return "High Risk"
+        elif risk_score >= 3:
+            return "Moderate Risk"
+        else:
+            return "Low Risk"
 
     def calculate_confidence_level(self) -> float:
         data_completeness = sum(1 for v in self.analysis_results.values() if v is not None and v != 'N/A') / len(self.analysis_results)
@@ -353,20 +374,29 @@ class AdvancedStockAnalyzer:
 
         confidence = (data_completeness + signal_consistency) * 5
         confidence *= (1 - missing_data_penalty)
+        confidence *= (1 - self.risk_score / 10)  # Reduce confidence for higher risk stocks
 
         return max(0, min(10, confidence))
 
-    def get_recommendation(self, score: float, confidence: float) -> Tuple[str, str]:
+    def get_recommendation(self, score: float, confidence: float, risk_assessment: str) -> Tuple[str, str]:
         if confidence < 5:
             return "Hold", "Low confidence in analysis, more research needed"
         
-        if score >= 75:
+        risk_adjustment = 0
+        if risk_assessment == "High Risk":
+            risk_adjustment = 20
+        elif risk_assessment == "Moderate Risk":
+            risk_adjustment = 10
+
+        adjusted_score = max(0, score - risk_adjustment)
+
+        if adjusted_score >= 80:
             return "Strong Buy", "Long-term (1 year or more)"
-        elif score >= 60:
+        elif adjusted_score >= 60:
             return "Buy", "Medium-term (6-12 months)"
-        elif score >= 40:
+        elif adjusted_score >= 40:
             return "Hold", "Short-term (3-6 months)"
-        elif score >= 25:
+        elif adjusted_score >= 20:
             return "Sell", "Consider selling in the near term"
         else:
             return "Strong Sell", "Consider immediate sale"
@@ -379,11 +409,14 @@ class AdvancedStockAnalyzer:
         technical = self.analysis_results
         confidence = overall['confidence']
         score = overall['score']
+        risk_assessment = overall['risk_assessment']
         
         summary = (f"{self.ticker} | Price: ${technical['current_price']:.2f} | "
-                   f"Score: {score:.2f}/90 | "
+                   f"Score: {score:.2f}/100 | "
                    f"Rec: {overall['recommendation']} | "
-                   f"Action: {overall['suggested_timeframe']} | Trend: {technical['trend']} | "
+                   f"Action: {overall['suggested_timeframe']} | "
+                   f"Trend: {technical['trend']} | "
+                   f"Risk: {risk_assessment} | "
                    f"Confidence: {confidence:.2f}/10")
         
         if technical['trend'] == 'Bullish' and overall['recommendation'] in ['Sell', 'Strong Sell']:
@@ -398,7 +431,7 @@ class AdvancedStockAnalyzer:
         if self.analysis_results.get('avg_volume', 0) < 100000:
             summary += f" | Warning: Low trading volume ({self.analysis_results['avg_volume']:.0f})"
         
-        if self.analysis_results.get('debt_to_equity', 0) > 200:
+        if self.analysis_results.get('debt_to_equity', 0) > 2:
             summary += f" | Warning: High debt-to-equity ratio ({self.analysis_results['debt_to_equity']:.2f})"
         
         negative_factors = [k for k, v in self.score_components.items() if v < 0]
