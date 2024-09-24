@@ -28,7 +28,7 @@ MINIMUM_DATA_POINTS = 100
 PAPER_TRADING = True
 BACKTESTING = True  # Set to True to run backtesting
 
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1286420702173597807/hNgcuYY68fm6t0ncWSSGt2QwrQvEybW5uRrr2nXZCMiizQnq6Wguhm41SBJcO8TicQWy"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
