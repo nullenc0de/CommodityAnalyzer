@@ -16,10 +16,10 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split, GridSearchCV
 from textblob import TextBlob
 import requests
-import random
+import subprocess
 
 # Configuration settings
-ACCOUNT_BALANCE = 100000
+ACCOUNT_BALANCE = 25000
 TRADING_INTERVAL = '1d'
 TRADING_PERIOD = '1y'
 CHECK_INTERVAL_MINUTES = 60
@@ -30,7 +30,9 @@ RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
 MINIMUM_DATA_POINTS = 100
 PAPER_TRADING = True
-BACKTESTING = True  # Set to True for backtesting, False for live trading
+BACKTESTING = False
+MAX_POSITION_SIZE = 0.1
+DAILY_LOSS_LIMIT = 0.02
 
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/your_webhook_url_here"
 NEWS_API_KEY = "your_news_api_key_here"
@@ -55,91 +57,16 @@ cursor.execute('''
 ''')
 conn.commit()
 
-POPULAR_STOCKS = [
-    "AAPL",  # Apple Inc.
-    "MSFT",  # Microsoft Corporation
-    "AMZN",  # Amazon.com, Inc.
-    "GOOGL",  # Alphabet Inc. (Google)
-    "FB",  # Meta Platforms, Inc.
-    "TSLA",  # Tesla, Inc.
-    "BRK-B",  # Berkshire Hathaway Inc.
-    "JNJ",  # Johnson & Johnson
-    "NVDA",  # NVIDIA Corporation
-    "PYPL",  # PayPal Holdings, Inc.
-    "ADBE",  # Adobe Inc.
-    "CRM",  # Salesforce, Inc.
-    "NFLX",  # Netflix, Inc.
-    "INTC",  # Intel Corporation
-    "AMD",  # Advanced Micro Devices, Inc.
-    "TXN",  # Texas Instruments Incorporated
-    "VRTX",  # Vertex Pharmaceuticals Incorporated
-    "ZM",  # Zoom Video Communications, Inc.
-    "BABA",  # Alibaba Group Holding Limited
-    "BABA",  # Alibaba Group Holding Limited
-    "TCEHY",  # Tencent Holdings Limited
-    "SHOP",  # Shopify Inc.
-    "COIN",  # Coinbase Global, Inc.
-    "TWTR",  # Twitter, Inc.
-    "SNAP",  # Snap Inc.
-    "UBER",  # Uber Technologies, Inc.
-    "LYFT",  # Lyft, Inc.
-    "SQ",  # Square Inc.
-    "ROKU",  # Roku, Inc.
-    "ETSY",  # Etsy, Inc.
-    "DOCU",  # DocuSign, Inc.
-    "WDAY",  # Workday, Inc.
-    "OKTA",  # Okta, Inc.
-    "TEAM",  # Atlassian Corporation Plc
-    "HUBS",  # HubSpot, Inc.
-    "ASML",  # ASML Holding N.V.
-    "LRCN",  # Lear Corporation
-    "LMT",  # Lockheed Martin Corporation
-    "BA",  # Boeing Co.
-    "UNP",  # Union Pacific Corporation
-    "CSX",  # CSX Corporation
-    "KHC",  # Kraft Heinz Company
-    "PG",  # Procter & Gamble Company
-    "KO",  # The Coca-Cola Company
-    "PEP",  # PepsiCo, Inc.
-    "JPM",  # JPMorgan Chase & Co.
-    "BAC",  # Bank of America Corporation
-    "WFC",  # Wells Fargo & Company
-    "C",  # Citigroup Inc.
-    "GS",  # The Goldman Sachs Group, Inc.
-    "V",  # Visa Inc.
-    "MA",  # Mastercard Incorporated
-    "ADSK",  # Autodesk, Inc.
-    "INTU",  # Intuit Inc.
-    "ORCL",  # Oracle Corporation
-    "SAP",  # SAP SE
-    "MU",  # Micron Technology, Inc.
-    "QCOM",  # Qualcomm Incorporated
-    "AVGO",  # Broadcom Inc.
-    "TXN",  # Texas Instruments Incorporated
-    "LRCN",  # Lear Corporation
-    "LMT",  # Lockheed Martin Corporation
-    "BA",  # Boeing Co.
-    "UNP",  # Union Pacific Corporation
-    "CSX",  # CSX Corporation
-    "KHC",  # Kraft Heinz Company
-    "PG",  # Procter & Gamble Company
-    "KO",  # The Coca-Cola Company
-    "PEP",  # PepsiCo, Inc.
-    "JPM",  # JPMorgan Chase & Co.
-    "BAC",  # Bank of America Corporation
-    "WFC",  # Wells Fargo & Company
-    "C",  # Citigroup Inc.
-    "GS",  # The Goldman Sachs Group, Inc.
-    "V",  # Visa Inc.
-    "MA",  # Mastercard Incorporated
-    "ADSK",  # Autodesk, Inc.
-    "INTU",  # Intuit Inc.
-    "ORCL",  # Oracle Corporation
-    "SAP",  # SAP SE
-    "MU",  # Micron Technology, Inc.
-    "QCOM",  # Qualcomm Incorporated
-    "AVGO",  # Broadcom Inc.
-]
+def fetch_nasdaq_tickers():
+    try:
+        command = "curl -s https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt | awk -F '|' '{print $1}'"
+        result = subprocess.run(command, shell=True, check=True, capture_output=True, text=True)
+        tickers = [line.strip() for line in result.stdout.split('\n') if line.strip() and line.strip() != 'Symbol']
+        logger.info(f"Fetched {len(tickers)} tickers from NASDAQ")
+        return tickers
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error fetching NASDAQ tickers: {e}")
+        return []
 
 async def send_discord_alert(session: aiohttp.ClientSession, message: str):
     payload = {"content": message}
@@ -166,6 +93,7 @@ async def get_stock_data(session: aiohttp.ClientSession, ticker: str, interval: 
         return pd.DataFrame()
 
 def calculate_indicators(data: pd.DataFrame) -> pd.DataFrame:
+    data['SMA_5'] = SMAIndicator(close=data['Close'], window=5).sma_indicator()
     data['SMA_20'] = SMAIndicator(close=data['Close'], window=20).sma_indicator()
     data['EMA_50'] = EMAIndicator(close=data['Close'], window=50).ema_indicator()
     macd = MACD(close=data['Close'])
@@ -183,49 +111,39 @@ def calculate_indicators(data: pd.DataFrame) -> pd.DataFrame:
     return data
 
 def prepare_data_for_ml(data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
-    features = ['SMA_20', 'EMA_50', 'MACD', 'MACD_Signal', 'RSI', 'Stoch_K', 'Stoch_D', 'BB_Upper', 'BB_Lower', 'ATR',
+    features = ['SMA_5', 'SMA_20', 'EMA_50', 'MACD', 'MACD_Signal', 'RSI', 'Stoch_K', 'Stoch_D', 'BB_Upper', 'BB_Lower', 'ATR',
                 'Volume', 'Volume_SMA']
     data['Target'] = (data['Close'].shift(-1) > data['Close']).astype(int)
-    
-    # Drop rows with NaN values
     data_cleaned = data.dropna()
-    
     X = data_cleaned[features]
     y = data_cleaned['Target']
-    
     return X, y
 
 def train_ml_model(data: pd.DataFrame):
     X, y = prepare_data_for_ml(data)
-    
-    if len(X) < 100:  # Arbitrary threshold, adjust as needed
+    if len(X) < 100:
         logger.warning(f"Insufficient data for ML model training. Data points: {len(X)}")
         return None
-    
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
     param_grid = {
         'n_estimators': [100, 200],
         'max_depth': [None, 10, 20],
         'min_samples_split': [2, 5],
         'min_samples_leaf': [1, 2]
     }
-    
     model = RandomForestClassifier(random_state=42)
     grid_search = GridSearchCV(model, param_grid, cv=5, scoring='accuracy', n_jobs=-1)
     grid_search.fit(X_train, y_train)
-    
     best_model = grid_search.best_estimator_
     accuracy = best_model.score(X_test, y_test)
     logger.info(f"Model accuracy: {accuracy:.2f}")
     logger.info(f"Best parameters: {grid_search.best_params_}")
-    
     return best_model
 
 def ai_trade_decision(model, current_data: pd.DataFrame) -> bool:
     if model is None:
         return True
-    features = ['SMA_20', 'EMA_50', 'MACD', 'MACD_Signal', 'RSI', 'Stoch_K', 'Stoch_D', 'BB_Upper', 'BB_Lower', 'ATR',
+    features = ['SMA_5', 'SMA_20', 'EMA_50', 'MACD', 'MACD_Signal', 'RSI', 'Stoch_K', 'Stoch_D', 'BB_Upper', 'BB_Lower', 'ATR',
                 'Volume', 'Volume_SMA']
     prediction = model.predict_proba(current_data[features].iloc[-1].to_frame().T)[0][1]
     return prediction > 0.6
@@ -233,7 +151,6 @@ def ai_trade_decision(model, current_data: pd.DataFrame) -> bool:
 def check_signals(data: pd.DataFrame, model, ticker: str) -> Tuple[bool, bool, float]:
     if data.empty or len(data) < 2:
         return False, False, 0
-
     try:
         current_price = data['Close'].iloc[-1]
         current_rsi = data['RSI'].iloc[-1]
@@ -241,6 +158,7 @@ def check_signals(data: pd.DataFrame, model, ticker: str) -> Tuple[bool, bool, f
         current_macd_signal = data['MACD_Signal'].iloc[-1]
         current_stoch_k = data['Stoch_K'].iloc[-1]
         current_stoch_d = data['Stoch_D'].iloc[-1]
+        sma_5 = data['SMA_5'].iloc[-1]
         sma_20 = data['SMA_20'].iloc[-1]
         ema_50 = data['EMA_50'].iloc[-1]
         bb_upper = data['BB_Upper'].iloc[-1]
@@ -248,43 +166,38 @@ def check_signals(data: pd.DataFrame, model, ticker: str) -> Tuple[bool, bool, f
         atr = data['ATR'].iloc[-1]
         volume = data['Volume'].iloc[-1]
         avg_volume = data['Volume_SMA'].iloc[-1]
-
+        momentum = (current_price / data['Close'].iloc[-5] - 1) * 100
         ai_decision = ai_trade_decision(model, data)
         sentiment = get_news_sentiment(ticker)
-
-        # Relaxed buy conditions
         buy_signal = (
-            (current_price > sma_20) and
-            (current_macd > current_macd_signal) and
-            (current_stoch_k > current_stoch_d) and
-            (current_rsi < 70) and  # Changed from 60 to 70
-            (volume > 0.8 * avg_volume) and  # Relaxed volume condition
-            ai_decision
+            (current_price > sma_5) and
+            (current_macd > current_macd_signal or current_macd_signal > 0) and
+            (current_stoch_k > current_stoch_d or current_stoch_k < 30) and
+            (current_rsi < 70) and
+            (volume > 0.7 * avg_volume) and
+            (momentum > 0) and
+            (ai_decision or sentiment > 0.2)
         )
-
-        # Relaxed sell conditions
         sell_signal = (
-            (current_price < sma_20) and
-            (current_macd < current_macd_signal) and
-            (current_stoch_k < current_stoch_d) and
-            (current_rsi > 30) and  # Changed from 40 to 30
-            (volume > 0.8 * avg_volume) and  # Relaxed volume condition
-            not ai_decision
+            (current_price < sma_5) and
+            (current_macd < current_macd_signal or current_macd_signal < 0) and
+            (current_stoch_k < current_stoch_d or current_stoch_k > 70) and
+            (current_rsi > 30) and
+            (volume > 0.7 * avg_volume) and
+            (momentum < 0) and
+            (not ai_decision or sentiment < -0.2)
         )
-
         volatility = atr / current_price
         risk_factor = INITIAL_RISK_FACTOR * (1 + volatility)
-
         position_size = calculate_position_size(current_price, atr, risk_factor)
-
-        logger.info(f"Current price: {current_price:.2f}, SMA_20: {sma_20:.2f}, EMA_50: {ema_50:.2f}")
+        logger.info(f"Current price: {current_price:.2f}, SMA_5: {sma_5:.2f}, SMA_20: {sma_20:.2f}, EMA_50: {ema_50:.2f}")
         logger.info(f"Current RSI: {current_rsi:.2f}, MACD: {current_macd:.2f}, MACD Signal: {current_macd_signal:.2f}")
         logger.info(f"Stoch K: {current_stoch_k:.2f}, Stoch D: {current_stoch_d:.2f}")
         logger.info(f"BB Upper: {bb_upper:.2f}, BB Lower: {bb_lower:.2f}")
         logger.info(f"Volume: {volume:.0f}, Avg Volume: {avg_volume:.0f}")
+        logger.info(f"Momentum: {momentum:.2f}%")
         logger.info(f"News Sentiment: {sentiment:.2f}")
         logger.info(f"Buy signal: {buy_signal}, Sell signal: {sell_signal}, Risk Factor: {risk_factor:.4f}")
-
         return buy_signal, sell_signal, position_size
     except KeyError as e:
         logger.error(f"Missing key in data: {e}")
@@ -292,21 +205,40 @@ def check_signals(data: pd.DataFrame, model, ticker: str) -> Tuple[bool, bool, f
 
 def calculate_position_size(price: float, atr: float, risk_factor: float) -> float:
     risk_per_trade = ACCOUNT_BALANCE * risk_factor
-    stop_loss = 1.5 * atr
+    stop_loss = 2 * atr
     shares = risk_per_trade / stop_loss
-    return np.floor(shares)
+    max_shares = (ACCOUNT_BALANCE * MAX_POSITION_SIZE) / price
+    return min(np.floor(shares), max_shares)
 
-async def get_most_active_stocks(session: aiohttp.ClientSession) -> List[str]:
-    return random.sample(POPULAR_STOCKS, min(MAX_STOCKS, len(POPULAR_STOCKS)))
-
-async def get_gap_up_stocks(session: aiohttp.ClientSession) -> List[str]:
-    return random.sample(POPULAR_STOCKS, min(MAX_STOCKS // 2, len(POPULAR_STOCKS)))
-
-async def get_combined_stock_list(session: aiohttp.ClientSession) -> List[str]:
-    most_active = await get_most_active_stocks(session)
-    gap_up = await get_gap_up_stocks(session)
-    combined = list(set(most_active + gap_up))
-    return combined[:MAX_STOCKS]
+def daily_stock_screener(stocks: List[str]) -> List[str]:
+    screened_stocks = []
+    logger.info(f"Starting stock screening process for {len(stocks)} stocks.")
+    for ticker in stocks:
+        try:
+            stock = yf.Ticker(ticker)
+            # Use '5d' instead of '1mo' to ensure data availability
+            data = stock.history(period="5d")
+            if len(data) < 5:
+                continue
+            current_price = data['Close'].iloc[-1]
+            sma_5 = data['Close'].rolling(window=5).mean().iloc[-1]
+            volume = data['Volume'].iloc[-1]
+            avg_volume = data['Volume'].mean()
+            daily_return = data['Close'].pct_change().iloc[-1]
+            
+            if (current_price > sma_5 and
+                volume > 1.5 * avg_volume and
+                daily_return > 0.02):
+                screened_stocks.append(ticker)
+                logger.info(f"Added {ticker} to screened stocks. Price: {current_price:.2f}, SMA5: {sma_5:.2f}, Volume: {volume:.0f}, Avg Volume: {avg_volume:.0f}, Daily Return: {daily_return:.2%}")
+            
+            if len(screened_stocks) >= MAX_STOCKS:
+                break
+        except Exception as e:
+            logger.debug(f"Error screening {ticker}: {str(e)}")
+    
+    logger.info(f"Stock screening completed. Selected {len(screened_stocks)} stocks: {', '.join(screened_stocks)}")
+    return screened_stocks[:MAX_STOCKS]
 
 def calculate_trade_performance(buy_price: float, sell_price: float) -> Tuple[float, float]:
     profit_loss = sell_price - buy_price
@@ -316,20 +248,18 @@ def calculate_trade_performance(buy_price: float, sell_price: float) -> Tuple[fl
 def check_exit_conditions(data: pd.DataFrame, entry_price: float, position_size: float) -> Tuple[bool, str]:
     current_price = data['Close'].iloc[-1]
     atr = data['ATR'].iloc[-1]
-    
     trailing_stop = entry_price - (2 * atr)
     if current_price <= trailing_stop:
         return True, "Trailing Stop Loss"
-    
     take_profit = entry_price + (3 * atr)
     if current_price >= take_profit:
         return True, "Take Profit"
-    
     days_held = (data.index[-1] - data.index[0]).days
     if days_held >= 5:
         return True, "Time-based Exit"
-    
     return False, ""
+
+# Part 2
 
 def get_sector_performance(tickers):
     sector_performance = {}
@@ -344,11 +274,8 @@ def get_sector_performance(tickers):
                 sector_performance[sector] = [performance]
         except Exception as e:
             logger.error(f"Error getting sector information for {ticker}: {str(e)}")
-    
-    # Calculate average performance for each sector
     for sector in sector_performance:
         sector_performance[sector] = sum(sector_performance[sector]) / len(sector_performance[sector])
-    
     return sector_performance
 
 def get_news_sentiment(ticker):
@@ -362,80 +289,63 @@ def get_news_sentiment(ticker):
         logger.error(f"Error fetching news for {ticker}")
         return 0
 
+def calculate_sharpe_ratio(returns):
+    return np.sqrt(252) * returns.mean() / returns.std()
+
+def track_performance(trades):
+    if not trades:
+        logger.info("No trades to analyze yet.")
+        return
+
+    df = pd.DataFrame(trades)
+    df['return'] = df['profit_loss_percentage'] / 100
+    sharpe = calculate_sharpe_ratio(df['return'])
+    max_drawdown = (df['profit_loss'].cumsum().cummin() / ACCOUNT_BALANCE * 100).min()
+    
+    logger.info(f"Performance Metrics:")
+    logger.info(f"Total Trades: {len(trades)}")
+    logger.info(f"Win Rate: {(df['profit_loss'] > 0).mean():.2%}")
+    logger.info(f"Average Return: {df['return'].mean():.2%}")
+    logger.info(f"Sharpe Ratio: {sharpe:.2f}")
+    logger.info(f"Max Drawdown: {max_drawdown:.2%}")
+
+def adjust_strategy(recent_trades):
+    win_rate = sum(1 for trade in recent_trades if trade['profit_loss'] > 0) / len(recent_trades)
+    avg_return = sum(trade['profit_loss_percentage'] for trade in recent_trades) / len(recent_trades)
+    
+    global INITIAL_RISK_FACTOR
+    if win_rate < 0.4 or avg_return < -0.5:
+        INITIAL_RISK_FACTOR *= 0.9  # Reduce risk if performing poorly
+    elif win_rate > 0.6 and avg_return > 1:
+        INITIAL_RISK_FACTOR *= 1.1  # Increase risk if performing well
+    
+    INITIAL_RISK_FACTOR = max(min(INITIAL_RISK_FACTOR, 0.02), 0.005)  # Keep within 0.5% to 2% range
+
 async def main():
     trades: Dict[str, Dict] = {}
+    all_trades = []
+    daily_pl = 0
 
     async with aiohttp.ClientSession() as session:
-        logger.info("Fetching combined stock list...")
-        tickers = await get_combined_stock_list(session)
-        logger.info(f"Combined Stock List: {', '.join(tickers)}")
-
-        if BACKTESTING:
-            logger.info("Starting backtesting...")
-            for ticker in tickers:
-                data = await get_stock_data(session, ticker, TRADING_INTERVAL, TRADING_PERIOD)
-                if data.empty:
-                    logger.warning(f"No data available for {ticker}")
-                    continue
-
-                logger.info(f"Backtesting {ticker} with {len(data)} data points")
-                data = calculate_indicators(data)
-                if data.empty:
-                    logger.warning(f"Insufficient data for calculating indicators for {ticker}")
-                if data.empty:
-                    logger.warning(f"Insufficient data for calculating indicators for {ticker}")
-                    continue
-
-                model = train_ml_model(data)
-                
-                # Perform backtesting
-                balance = ACCOUNT_BALANCE
-                position = None
-                trades = []
-
-                for i in range(MINIMUM_DATA_POINTS, len(data)):
-                    current_data = data.iloc[:i+1]
-                    buy, sell, position_size = check_signals(current_data, model, ticker)
-                    current_price = current_data['Close'].iloc[-1]
-
-                    if position is None and buy:
-                        position = {'entry_price': current_price, 'size': position_size, 'entry_date': current_data.index[-1]}
-                        logger.info(f"BUY signal for {ticker} at {position['entry_date']} - Price: {current_price:.2f}, Size: {position_size}")
-                    elif position is not None:
-                        exit_condition, exit_reason = check_exit_conditions(current_data, position['entry_price'], position['size'])
-                        if sell or exit_condition:
-                            profit_loss, profit_loss_percentage = calculate_trade_performance(position['entry_price'], current_price)
-                            total_pl = profit_loss * position['size']
-                            balance += total_pl
-                            trades.append({
-                                'entry_date': position['entry_date'],
-                                'exit_date': current_data.index[-1],
-                                'entry_price': position['entry_price'],
-                                'exit_price': current_price,
-                                'profit_loss': total_pl,
-                                'profit_loss_percentage': profit_loss_percentage
-                            })
-                            logger.info(f"SELL signal for {ticker} at {current_data.index[-1]} - Price: {current_price:.2f}, P/L: ${total_pl:.2f} ({profit_loss_percentage:.2f}%)")
-                            position = None
-
-                # Calculate backtesting results
-                total_trades = len(trades)
-                winning_trades = sum(1 for trade in trades if trade['profit_loss'] > 0)
-                total_profit = sum(trade['profit_loss'] for trade in trades)
-                max_drawdown = min(trade['profit_loss'] for trade in trades) if trades else 0
-
-                logger.info(f"Backtesting results for {ticker}:")
-                logger.info(f"Final Balance: ${balance:.2f}")
-                logger.info(f"Total Profit: ${total_profit:.2f}")
-                logger.info(f"Total Trades: {total_trades}")
-                logger.info(f"Win Rate: {(winning_trades / total_trades * 100 if total_trades > 0 else 0):.2f}%")
-                logger.info(f"Max Drawdown: ${abs(max_drawdown):.2f}")
-
-            logger.info("Backtesting completed.")
-            return
-
-        # Live trading loop
         while True:
+            logger.info("Fetching NASDAQ tickers...")
+            nasdaq_tickers = fetch_nasdaq_tickers()
+            
+            if not nasdaq_tickers:
+                logger.warning("Failed to fetch NASDAQ tickers. Waiting for next iteration.")
+                await asyncio.sleep(SLEEP_MINUTES * 60)
+                continue
+            
+            logger.info("Screening stocks for today's trading...")
+            tickers = daily_stock_screener(nasdaq_tickers)
+            
+            if not tickers:
+                logger.warning("No stocks selected for trading today. Waiting for next iteration.")
+                await asyncio.sleep(SLEEP_MINUTES * 60)
+                continue
+            
+            logger.info(f"Selected stocks for today: {', '.join(tickers)}")
+
             sector_performance = get_sector_performance(tickers)
             logger.info("Sector Performance:")
             for sector, performance in sector_performance.items():
@@ -460,6 +370,9 @@ async def main():
                 current_price = data['Close'].iloc[-1]
 
                 if buy and ticker not in trades:
+                    if daily_pl / ACCOUNT_BALANCE <= -DAILY_LOSS_LIMIT:
+                        logger.warning("Daily loss limit reached. Stopping trading for today.")
+                        break
                     trades[ticker] = {'buy_time': datetime.now(), 'buy_price': current_price, 'position_size': position_size}
                     logger.info(f"{'PAPER ' if PAPER_TRADING else ''}BUY signal for {ticker} at price {current_price:.2f}, position size: {position_size}")
                     await send_discord_alert(session, f"{'PAPER ' if PAPER_TRADING else ''}BUY signal for {ticker} at price ${current_price:.2f}, position size: {position_size}")
@@ -471,6 +384,7 @@ async def main():
                         position_size = trades[ticker]['position_size']
                         profit_loss, profit_loss_percentage = calculate_trade_performance(buy_price, current_price)
                         total_pl = profit_loss * position_size
+                        daily_pl += total_pl
                         logger.info(f"{'PAPER ' if PAPER_TRADING else ''}SELL signal for {ticker} at price {current_price:.2f}")
                         logger.info(f"Trade performance for {ticker}: Profit/Loss = ${total_pl:.2f}, Profit/Loss % = {profit_loss_percentage:.2f}%")
                         logger.info(f"Exit reason: {exit_reason if exit_condition else 'Sell Signal'}")
@@ -479,13 +393,34 @@ async def main():
                                                  f"Trade performance: Profit/Loss = ${total_pl:.2f}, Profit/Loss % = {profit_loss_percentage:.2f}%\n"
                                                  f"Exit reason: {exit_reason if exit_condition else 'Sell Signal'}")
 
+                        trade_record = {
+                            'ticker': ticker,
+                            'buy_time': trades[ticker]['buy_time'],
+                            'buy_price': buy_price,
+                            'sell_time': datetime.now(),
+                            'sell_price': current_price,
+                            'profit_loss': total_pl,
+                            'profit_loss_percentage': profit_loss_percentage,
+                            'is_paper_trade': int(PAPER_TRADING)
+                        }
+                        all_trades.append(trade_record)
+
                         cursor.execute('''
                             INSERT INTO trades (ticker, buy_time, buy_price, sell_time, sell_price, profit_loss, profit_loss_percentage, is_paper_trade)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        ''', (ticker, trades[ticker]['buy_time'], buy_price, datetime.now(), current_price, total_pl, profit_loss_percentage, int(PAPER_TRADING)))
+                        ''', tuple(trade_record.values()))
                         conn.commit()
 
                         del trades[ticker]
+
+            # End of day operations
+            if all_trades:
+                track_performance(all_trades)
+                adjust_strategy(all_trades[-20:])  # Adjust strategy based on last 20 trades
+            else:
+                logger.info("No trades were made today.")
+
+            daily_pl = 0  # Reset daily profit/loss
 
             logger.info(f"Sleeping for {SLEEP_MINUTES} minutes before next update...")
             await asyncio.sleep(SLEEP_MINUTES * 60)
