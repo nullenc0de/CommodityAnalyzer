@@ -35,7 +35,7 @@ BACKTESTING = False
 MAX_POSITION_SIZE = 0.1
 DAILY_LOSS_LIMIT = 0.02
 
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1286420702173597807/hNgcuYY68fm6t0ncWSSGt2QwrQvEybW5uRrr2nXZCMiizQnq6Wguhm41SBJcO8TicQWy"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/Wy"
 NEWS_API_KEY = "your_news_api_key_here"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -177,15 +177,21 @@ def check_signals(data: pd.DataFrame, model, ticker: str) -> Tuple[bool, bool, f
         momentum = (current_price / data['Close'].iloc[-5] - 1) * 100
         ai_decision = ai_trade_decision(model, data)
         sentiment = get_news_sentiment(ticker)
+
+        # New conditions
+        high_momentum = momentum > 50  # Adjust this threshold as needed
+        volume_spike = volume > 5 * avg_volume  # Adjust this multiplier as needed
+
         buy_signal = (
             (current_price > sma_5) and
             (current_macd > current_macd_signal or current_macd_signal > 0) and
             (current_stoch_k > current_stoch_d or current_stoch_k < 30) and
-            (current_rsi < 70) and
+            ((current_rsi < 70) or (high_momentum and current_rsi < 85)) and  # Relaxed RSI condition for high momentum
             (volume > 0.7 * avg_volume) and
             (momentum > 0) and
-            (ai_decision or sentiment > 0.2)
+            (ai_decision or sentiment > 0.2 or (high_momentum and volume_spike))  # Added high momentum and volume spike condition
         )
+
         sell_signal = (
             (current_price < sma_5) and
             (current_macd < current_macd_signal or current_macd_signal < 0) and
@@ -195,9 +201,11 @@ def check_signals(data: pd.DataFrame, model, ticker: str) -> Tuple[bool, bool, f
             (momentum < 0) and
             (not ai_decision or sentiment < -0.2)
         )
+
         volatility = atr / current_price
         risk_factor = INITIAL_RISK_FACTOR * (1 + volatility)
         position_size = calculate_position_size(current_price, atr, risk_factor)
+
         logger.info(f"Current price: {current_price:.2f}, SMA_5: {sma_5:.2f}, SMA_20: {sma_20:.2f}, EMA_50: {ema_50:.2f}")
         logger.info(f"Current RSI: {current_rsi:.2f}, MACD: {current_macd:.2f}, MACD Signal: {current_macd_signal:.2f}")
         logger.info(f"Stoch K: {current_stoch_k:.2f}, Stoch D: {current_stoch_d:.2f}")
@@ -205,7 +213,9 @@ def check_signals(data: pd.DataFrame, model, ticker: str) -> Tuple[bool, bool, f
         logger.info(f"Volume: {volume:.0f}, Avg Volume: {avg_volume:.0f}")
         logger.info(f"Momentum: {momentum:.2f}%")
         logger.info(f"News Sentiment: {sentiment:.2f}")
+        logger.info(f"High Momentum: {high_momentum}, Volume Spike: {volume_spike}")
         logger.info(f"Buy signal: {buy_signal}, Sell signal: {sell_signal}, Risk Factor: {risk_factor:.4f}")
+
         return buy_signal, sell_signal, position_size
     except KeyError as e:
         logger.error(f"Missing key in data: {e}")
