@@ -18,6 +18,7 @@ from textblob import TextBlob
 import requests
 import subprocess
 import os
+from datetime import timezone
 
 # Configuration settings
 ACCOUNT_BALANCE = 25000
@@ -39,7 +40,7 @@ MIN_HOLD_TIME = timedelta(hours=1)  # Minimum hold time of 1 hour
 TAKE_PROFIT_ATR_MULTIPLE = 3  # Take profit at 3x ATR
 COOLDOWN_PERIOD = timedelta(hours=4)  # Cooldown period before re-entry
 
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/17y"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/12864y"
 NEWS_API_KEY = "your_news_api_key_here"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -71,7 +72,7 @@ class PositionTracker:
         self.positions[ticker] = {
             'quantity': quantity,
             'entry_price': entry_price,
-            'entry_time': datetime.now(),
+            'entry_time': datetime.now(timezone.utc),
             'highest_price': entry_price,
             'trailing_stop': entry_price * (1 - TRAILING_STOP_PERCENTAGE)
         }
@@ -79,7 +80,7 @@ class PositionTracker:
     def close_position(self, ticker):
         if ticker in self.positions:
             del self.positions[ticker]
-            self.recent_trades[ticker] = datetime.now()
+            self.recent_trades[ticker] = datetime.now(timezone.utc)
 
     def get_open_positions(self):
         return self.positions
@@ -336,11 +337,17 @@ def calculate_trade_performance(buy_price: float, sell_price: float) -> Tuple[fl
 
 def check_exit_conditions(data: pd.DataFrame, position: dict) -> Tuple[bool, str]:
     current_price = data['Close'].iloc[-1]
-    current_time = data.index[-1]
+    current_time = data.index[-1].to_pydatetime()
     entry_time = position['entry_time']
     entry_price = position['entry_price']
     trailing_stop = position['trailing_stop']
     atr = data['ATR'].iloc[-1]
+
+    # Ensure both datetimes are timezone-aware
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    if entry_time.tzinfo is None:
+        entry_time = entry_time.replace(tzinfo=timezone.utc)
 
     if current_price <= trailing_stop:
         return True, "Trailing Stop Loss"
@@ -453,7 +460,7 @@ async def main():
                 model = train_ml_model(data)
                 buy, sell, position_size = check_signals(data, model, ticker)
                 current_price = data['Close'].iloc[-1]
-                current_time = data.index[-1]
+                current_time = data.index[-1].to_pydatetime().replace(tzinfo=timezone.utc)
 
                 if ticker in position_tracker.get_open_positions():
                     position = position_tracker.get_open_positions()[ticker]
