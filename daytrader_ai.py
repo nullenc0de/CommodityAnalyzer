@@ -39,7 +39,7 @@ MIN_HOLD_TIME = timedelta(hours=1)  # Minimum hold time of 1 hour
 TAKE_PROFIT_ATR_MULTIPLE = 3  # Take profit at 3x ATR
 COOLDOWN_PERIOD = timedelta(hours=4)  # Cooldown period before re-entry
 
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1286420702173597807/hNgcuYY68fm6t0ncWSSGt2QwrQvEybW5uRrr2nXZCMiizQnq6Wguhm41SBJcO8TicQWy"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/17y"
 NEWS_API_KEY = "your_news_api_key_here"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
