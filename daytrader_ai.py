@@ -34,6 +34,10 @@ PAPER_TRADING = True
 BACKTESTING = False
 MAX_POSITION_SIZE = 0.1
 DAILY_LOSS_LIMIT = 0.02
+TRAILING_STOP_PERCENTAGE = 0.05  # 5% trailing stop
+MIN_HOLD_TIME = timedelta(hours=1)  # Minimum hold time of 1 hour
+TAKE_PROFIT_ATR_MULTIPLE = 3  # Take profit at 3x ATR
+COOLDOWN_PERIOD = timedelta(hours=4)  # Cooldown period before re-entry
 
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1286420702173597807/hNgcuYY68fm6t0ncWSSGt2QwrQvEybW5uRrr2nXZCMiizQnq6Wguhm41SBJcO8TicQWy"
 NEWS_API_KEY = "your_news_api_key_here"
@@ -60,17 +64,37 @@ conn.commit()
 
 class PositionTracker:
     def __init__(self):
-        self.positions = {}  # ticker: {'quantity': int, 'entry_price': float, 'entry_time': datetime}
+        self.positions = {}  # ticker: {'quantity': int, 'entry_price': float, 'entry_time': datetime, 'highest_price': float, 'trailing_stop': float}
+        self.recent_trades = {}  # ticker: last_exit_time
 
     def open_position(self, ticker, quantity, entry_price):
-        self.positions[ticker] = {'quantity': quantity, 'entry_price': entry_price, 'entry_time': datetime.now()}
+        self.positions[ticker] = {
+            'quantity': quantity,
+            'entry_price': entry_price,
+            'entry_time': datetime.now(),
+            'highest_price': entry_price,
+            'trailing_stop': entry_price * (1 - TRAILING_STOP_PERCENTAGE)
+        }
 
     def close_position(self, ticker):
         if ticker in self.positions:
             del self.positions[ticker]
+            self.recent_trades[ticker] = datetime.now()
 
     def get_open_positions(self):
         return self.positions
+
+    def update_trailing_stop(self, ticker, current_price):
+        if ticker in self.positions:
+            position = self.positions[ticker]
+            if current_price > position['highest_price']:
+                position['highest_price'] = current_price
+                position['trailing_stop'] = current_price * (1 - TRAILING_STOP_PERCENTAGE)
+
+    def can_open_position(self, ticker, current_time):
+        if ticker in self.recent_trades:
+            return (current_time - self.recent_trades[ticker]) > COOLDOWN_PERIOD
+        return True
 
 position_tracker = PositionTracker()
 
@@ -243,6 +267,8 @@ def calculate_position_size(price: float, atr: float, risk_factor: float) -> flo
     max_shares = (ACCOUNT_BALANCE * MAX_POSITION_SIZE) / price
     return min(np.floor(shares), max_shares)
 
+# Part 2
+
 def get_sector_performance(tickers):
     sector_performance = {}
     for ticker in tickers:
@@ -273,8 +299,6 @@ def get_news_sentiment(ticker):
 
 def calculate_sharpe_ratio(returns):
     return np.sqrt(252) * returns.mean() / returns.std()
-
-# Part 2
 
 def track_performance(trades):
     if not trades:
@@ -310,18 +334,24 @@ def calculate_trade_performance(buy_price: float, sell_price: float) -> Tuple[fl
     profit_loss_percentage = (profit_loss / buy_price) * 100
     return profit_loss, profit_loss_percentage
 
-def check_exit_conditions(data: pd.DataFrame, entry_price: float, position_size: float) -> Tuple[bool, str]:
+def check_exit_conditions(data: pd.DataFrame, position: dict) -> Tuple[bool, str]:
     current_price = data['Close'].iloc[-1]
+    current_time = data.index[-1]
+    entry_time = position['entry_time']
+    entry_price = position['entry_price']
+    trailing_stop = position['trailing_stop']
     atr = data['ATR'].iloc[-1]
-    trailing_stop = entry_price - (2 * atr)
+
     if current_price <= trailing_stop:
         return True, "Trailing Stop Loss"
-    take_profit = entry_price + (3 * atr)
-    if current_price >= take_profit:
+
+    take_profit = entry_price + (TAKE_PROFIT_ATR_MULTIPLE * atr)
+    if current_price >= take_profit and (current_time - entry_time) >= MIN_HOLD_TIME:
         return True, "Take Profit"
-    days_held = (data.index[-1] - data.index[0]).days
-    if days_held >= 5:
+
+    if (current_time - entry_time) >= timedelta(days=5):
         return True, "Time-based Exit"
+
     return False, ""
 
 async def monitor_positions(session: aiohttp.ClientSession):
@@ -334,10 +364,13 @@ async def monitor_positions(session: aiohttp.ClientSession):
             data = calculate_indicators(data)
             model = train_ml_model(data)
             _, sell, _ = check_signals(data, model, ticker)
-            exit_condition, exit_reason = check_exit_conditions(data, position['entry_price'], position['quantity'])
+            
+            current_price = data['Close'].iloc[-1]
+            position_tracker.update_trailing_stop(ticker, current_price)
+            
+            exit_condition, exit_reason = check_exit_conditions(data, position)
             
             if sell or exit_condition:
-                current_price = data['Close'].iloc[-1]
                 profit_loss, profit_loss_percentage = calculate_trade_performance(position['entry_price'], current_price)
                 total_pl = profit_loss * position['quantity']
                 
@@ -420,23 +453,18 @@ async def main():
                 model = train_ml_model(data)
                 buy, sell, position_size = check_signals(data, model, ticker)
                 current_price = data['Close'].iloc[-1]
+                current_time = data.index[-1]
 
-                if buy and ticker not in position_tracker.get_open_positions():
-                    if daily_pl / ACCOUNT_BALANCE <= -DAILY_LOSS_LIMIT:
-                        logger.warning("Daily loss limit reached. Stopping trading for today.")
-                        break
-                    position_tracker.open_position(ticker, position_size, current_price)
-                    logger.info(f"{'PAPER ' if PAPER_TRADING else ''}BUY signal for {ticker} at price {current_price:.2f}, position size: {position_size}")
-                    await send_discord_alert(session, f"{'PAPER ' if PAPER_TRADING else ''}BUY signal for {ticker} at price ${current_price:.2f}, position size: {position_size}")
-                    trades_made_today = True
-
-                elif ticker in position_tracker.get_open_positions():
+                if ticker in position_tracker.get_open_positions():
                     position = position_tracker.get_open_positions()[ticker]
-                    exit_condition, exit_reason = check_exit_conditions(data, position['entry_price'], position['quantity'])
+                    position_tracker.update_trailing_stop(ticker, current_price)
+                    exit_condition, exit_reason = check_exit_conditions(data, position)
+                    
                     if sell or exit_condition:
                         profit_loss, profit_loss_percentage = calculate_trade_performance(position['entry_price'], current_price)
                         total_pl = profit_loss * position['quantity']
                         daily_pl += total_pl
+                        
                         logger.info(f"{'PAPER ' if PAPER_TRADING else ''}SELL signal for {ticker} at price {current_price:.2f}")
                         logger.info(f"Trade performance for {ticker}: Profit/Loss = ${total_pl:.2f}, Profit/Loss % = {profit_loss_percentage:.2f}%")
                         logger.info(f"Exit reason: {exit_reason if exit_condition else 'Sell Signal'}")
@@ -449,7 +477,7 @@ async def main():
                             'ticker': ticker,
                             'buy_time': position['entry_time'],
                             'buy_price': position['entry_price'],
-                            'sell_time': datetime.now(),
+                            'sell_time': current_time,
                             'sell_price': current_price,
                             'profit_loss': total_pl,
                             'profit_loss_percentage': profit_loss_percentage,
@@ -465,6 +493,16 @@ async def main():
 
                         position_tracker.close_position(ticker)
                         trades_made_today = True
+
+                elif buy and position_tracker.can_open_position(ticker, current_time):
+                    if daily_pl / ACCOUNT_BALANCE <= -DAILY_LOSS_LIMIT:
+                        logger.warning("Daily loss limit reached. Stopping trading for today.")
+                        break
+                    
+                    position_tracker.open_position(ticker, position_size, current_price)
+                    logger.info(f"{'PAPER ' if PAPER_TRADING else ''}BUY signal for {ticker} at price {current_price:.2f}, position size: {position_size}")
+                    await send_discord_alert(session, f"{'PAPER ' if PAPER_TRADING else ''}BUY signal for {ticker} at price ${current_price:.2f}, position size: {position_size}")
+                    trades_made_today = True
 
             # End of day operations
             if trades_made_today:
