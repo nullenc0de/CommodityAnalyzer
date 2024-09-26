@@ -23,8 +23,8 @@ import os
 ACCOUNT_BALANCE = 25000
 TRADING_INTERVAL = '1d'
 TRADING_PERIOD = '1y'
-CHECK_INTERVAL_MINUTES = 60
-SLEEP_MINUTES = 5
+CHECK_INTERVAL_SECONDS = 60  # Check every minute
+SLEEP_SECONDS = 60  # Sleep for 1 minute between full analyses
 MAX_STOCKS = 100
 INITIAL_RISK_FACTOR = 0.01
 RSI_OVERSOLD = 30
@@ -35,7 +35,7 @@ BACKTESTING = False
 MAX_POSITION_SIZE = 0.1
 DAILY_LOSS_LIMIT = 0.02
 
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/Wy"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/y"
 NEWS_API_KEY = "your_news_api_key_here"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -57,6 +57,22 @@ cursor.execute('''
     )
 ''')
 conn.commit()
+
+class PositionTracker:
+    def __init__(self):
+        self.positions = {}  # ticker: {'quantity': int, 'entry_price': float, 'entry_time': datetime}
+
+    def open_position(self, ticker, quantity, entry_price):
+        self.positions[ticker] = {'quantity': quantity, 'entry_price': entry_price, 'entry_time': datetime.now()}
+
+    def close_position(self, ticker):
+        if ticker in self.positions:
+            del self.positions[ticker]
+
+    def get_open_positions(self):
+        return self.positions
+
+position_tracker = PositionTracker()
 
 def fetch_finviz_tickers():
     try:
@@ -178,18 +194,17 @@ def check_signals(data: pd.DataFrame, model, ticker: str) -> Tuple[bool, bool, f
         ai_decision = ai_trade_decision(model, data)
         sentiment = get_news_sentiment(ticker)
 
-        # New conditions
-        high_momentum = momentum > 50  # Adjust this threshold as needed
-        volume_spike = volume > 5 * avg_volume  # Adjust this multiplier as needed
+        high_momentum = momentum > 50
+        volume_spike = volume > 5 * avg_volume
 
         buy_signal = (
             (current_price > sma_5) and
             (current_macd > current_macd_signal or current_macd_signal > 0) and
             (current_stoch_k > current_stoch_d or current_stoch_k < 30) and
-            ((current_rsi < 70) or (high_momentum and current_rsi < 85)) and  # Relaxed RSI condition for high momentum
+            ((current_rsi < 70) or (high_momentum and current_rsi < 85)) and
             (volume > 0.7 * avg_volume) and
             (momentum > 0) and
-            (ai_decision or sentiment > 0.2 or (high_momentum and volume_spike))  # Added high momentum and volume spike condition
+            (ai_decision or sentiment > 0.2 or (high_momentum and volume_spike))
         )
 
         sell_signal = (
@@ -233,7 +248,7 @@ def get_sector_performance(tickers):
     for ticker in tickers:
         try:
             stock = yf.Ticker(ticker)
-            sector = stock.info['sector']
+            sector = stock.info.get('sector', 'Unknown')
             performance = (stock.history(period="1mo")['Close'].iloc[-1] / stock.history(period="1mo")['Close'].iloc[0] - 1) * 100
             if sector in sector_performance:
                 sector_performance[sector].append(performance)
@@ -259,6 +274,8 @@ def get_news_sentiment(ticker):
 def calculate_sharpe_ratio(returns):
     return np.sqrt(252) * returns.mean() / returns.std()
 
+# Part 2
+
 def track_performance(trades):
     if not trades:
         logger.info("No trades to analyze yet.")
@@ -275,8 +292,6 @@ def track_performance(trades):
     logger.info(f"Average Return: {df['return'].mean():.2%}")
     logger.info(f"Sharpe Ratio: {sharpe:.2f}")
     logger.info(f"Max Drawdown: {max_drawdown:.2%}")
-
-# Part 2
 
 def adjust_strategy(recent_trades):
     win_rate = sum(1 for trade in recent_trades if trade['profit_loss'] > 0) / len(recent_trades)
@@ -309,12 +324,60 @@ def check_exit_conditions(data: pd.DataFrame, entry_price: float, position_size:
         return True, "Time-based Exit"
     return False, ""
 
+async def monitor_positions(session: aiohttp.ClientSession):
+    while True:
+        for ticker, position in list(position_tracker.get_open_positions().items()):
+            data = await get_stock_data(session, ticker, TRADING_INTERVAL, '1d')
+            if data.empty:
+                continue
+            
+            data = calculate_indicators(data)
+            model = train_ml_model(data)
+            _, sell, _ = check_signals(data, model, ticker)
+            exit_condition, exit_reason = check_exit_conditions(data, position['entry_price'], position['quantity'])
+            
+            if sell or exit_condition:
+                current_price = data['Close'].iloc[-1]
+                profit_loss, profit_loss_percentage = calculate_trade_performance(position['entry_price'], current_price)
+                total_pl = profit_loss * position['quantity']
+                
+                logger.info(f"{'PAPER ' if PAPER_TRADING else ''}SELL signal for {ticker} at price {current_price:.2f}")
+                logger.info(f"Trade performance for {ticker}: Profit/Loss = ${total_pl:.2f}, Profit/Loss % = {profit_loss_percentage:.2f}%")
+                logger.info(f"Exit reason: {exit_reason if exit_condition else 'Sell Signal'}")
+                
+                await send_discord_alert(session, f"{'PAPER ' if PAPER_TRADING else ''}SELL signal for {ticker} at price ${current_price:.2f}\n"
+                                         f"Trade performance: Profit/Loss = ${total_pl:.2f}, Profit/Loss % = {profit_loss_percentage:.2f}%\n"
+                                         f"Exit reason: {exit_reason if exit_condition else 'Sell Signal'}")
+                
+                trade_record = {
+                    'ticker': ticker,
+                    'buy_time': position['entry_time'],
+                    'buy_price': position['entry_price'],
+                    'sell_time': datetime.now(),
+                    'sell_price': current_price,
+                    'profit_loss': total_pl,
+                    'profit_loss_percentage': profit_loss_percentage,
+                    'is_paper_trade': int(PAPER_TRADING)
+                }
+                
+                cursor.execute('''
+                    INSERT INTO trades (ticker, buy_time, buy_price, sell_time, sell_price, profit_loss, profit_loss_percentage, is_paper_trade)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', tuple(trade_record.values()))
+                conn.commit()
+                
+                position_tracker.close_position(ticker)
+        
+        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+
 async def main():
-    trades: Dict[str, Dict] = {}
     all_trades = []
     daily_pl = 0
+    trades_made_today = False
 
     async with aiohttp.ClientSession() as session:
+        monitor_task = asyncio.create_task(monitor_positions(session))
+        
         while True:
             logger.info("Fetching Finviz tickers...")
             finviz_tickers = fetch_finviz_tickers()
@@ -328,7 +391,6 @@ async def main():
             stock_picks = read_stock_picks()
             logger.info(f"Manual stock picks: {', '.join(stock_picks)}")
             
-            # Combine Finviz tickers and stock picks, removing duplicates
             tickers = list(set(finviz_tickers + stock_picks))
             
             if not tickers:
@@ -359,21 +421,21 @@ async def main():
                 buy, sell, position_size = check_signals(data, model, ticker)
                 current_price = data['Close'].iloc[-1]
 
-                if buy and ticker not in trades:
+                if buy and ticker not in position_tracker.get_open_positions():
                     if daily_pl / ACCOUNT_BALANCE <= -DAILY_LOSS_LIMIT:
                         logger.warning("Daily loss limit reached. Stopping trading for today.")
                         break
-                    trades[ticker] = {'buy_time': datetime.now(), 'buy_price': current_price, 'position_size': position_size}
+                    position_tracker.open_position(ticker, position_size, current_price)
                     logger.info(f"{'PAPER ' if PAPER_TRADING else ''}BUY signal for {ticker} at price {current_price:.2f}, position size: {position_size}")
                     await send_discord_alert(session, f"{'PAPER ' if PAPER_TRADING else ''}BUY signal for {ticker} at price ${current_price:.2f}, position size: {position_size}")
+                    trades_made_today = True
 
-                elif ticker in trades:
-                    exit_condition, exit_reason = check_exit_conditions(data, trades[ticker]['buy_price'], trades[ticker]['position_size'])
+                elif ticker in position_tracker.get_open_positions():
+                    position = position_tracker.get_open_positions()[ticker]
+                    exit_condition, exit_reason = check_exit_conditions(data, position['entry_price'], position['quantity'])
                     if sell or exit_condition:
-                        buy_price = trades[ticker]['buy_price']
-                        position_size = trades[ticker]['position_size']
-                        profit_loss, profit_loss_percentage = calculate_trade_performance(buy_price, current_price)
-                        total_pl = profit_loss * position_size
+                        profit_loss, profit_loss_percentage = calculate_trade_performance(position['entry_price'], current_price)
+                        total_pl = profit_loss * position['quantity']
                         daily_pl += total_pl
                         logger.info(f"{'PAPER ' if PAPER_TRADING else ''}SELL signal for {ticker} at price {current_price:.2f}")
                         logger.info(f"Trade performance for {ticker}: Profit/Loss = ${total_pl:.2f}, Profit/Loss % = {profit_loss_percentage:.2f}%")
@@ -385,8 +447,8 @@ async def main():
 
                         trade_record = {
                             'ticker': ticker,
-                            'buy_time': trades[ticker]['buy_time'],
-                            'buy_price': buy_price,
+                            'buy_time': position['entry_time'],
+                            'buy_price': position['entry_price'],
                             'sell_time': datetime.now(),
                             'sell_price': current_price,
                             'profit_loss': total_pl,
@@ -401,19 +463,30 @@ async def main():
                         ''', tuple(trade_record.values()))
                         conn.commit()
 
-                        del trades[ticker]
+                        position_tracker.close_position(ticker)
+                        trades_made_today = True
 
             # End of day operations
-            if all_trades:
-                track_performance(all_trades)
-                adjust_strategy(all_trades[-20:])  # Adjust strategy based on last 20 trades
+            if trades_made_today:
+                logger.info("Trades were made today.")
+                if all_trades:
+                    track_performance(all_trades)
+                    adjust_strategy(all_trades[-20:])  # Adjust strategy based on last 20 trades
             else:
                 logger.info("No trades were made today.")
 
+            trades_made_today = False  # Reset for the next cycle
             daily_pl = 0  # Reset daily profit/loss
 
             logger.info(f"Sleeping for {SLEEP_MINUTES} minutes before next update...")
             await asyncio.sleep(SLEEP_MINUTES * 60)
+
+        # Ensure the monitor task is properly cleaned up
+        monitor_task.cancel()
+        try:
+            await monitor_task
+        except asyncio.CancelledError:
+            pass
 
 if __name__ == "__main__":
     asyncio.run(main())
