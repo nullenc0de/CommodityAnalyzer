@@ -17,6 +17,7 @@ from sklearn.model_selection import train_test_split, GridSearchCV
 from textblob import TextBlob
 import requests
 import subprocess
+import os
 
 # Configuration settings
 ACCOUNT_BALANCE = 25000
@@ -24,7 +25,7 @@ TRADING_INTERVAL = '1d'
 TRADING_PERIOD = '1y'
 CHECK_INTERVAL_MINUTES = 60
 SLEEP_MINUTES = 5
-MAX_STOCKS = 20
+MAX_STOCKS = 100
 INITIAL_RISK_FACTOR = 0.01
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
@@ -34,7 +35,7 @@ BACKTESTING = False
 MAX_POSITION_SIZE = 0.1
 DAILY_LOSS_LIMIT = 0.02
 
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/your_webhook_url_here"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1286420702173597807/hNgcuYY68fm6t0ncWSSGt2QwrQvEybW5uRrr2nXZCMiizQnq6Wguhm41SBJcO8TicQWy"
 NEWS_API_KEY = "your_news_api_key_here"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -57,16 +58,23 @@ cursor.execute('''
 ''')
 conn.commit()
 
-def fetch_nasdaq_tickers():
+def fetch_finviz_tickers():
     try:
-        command = "curl -s https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt | awk -F '|' '{print $1}'"
+        command = "curl 'https://finviz.com/' | grep -oP '(?<=quote\.ashx\?t=)[A-Z.-]+' | sort -u"
         result = subprocess.run(command, shell=True, check=True, capture_output=True, text=True)
-        tickers = [line.strip() for line in result.stdout.split('\n') if line.strip() and line.strip() != 'Symbol']
-        logger.info(f"Fetched {len(tickers)} tickers from NASDAQ")
+        tickers = [line.strip() for line in result.stdout.split('\n') if line.strip()]
+        logger.info(f"Fetched {len(tickers)} tickers from Finviz")
         return tickers
     except subprocess.CalledProcessError as e:
-        logger.error(f"Error fetching NASDAQ tickers: {e}")
+        logger.error(f"Error fetching Finviz tickers: {e}")
         return []
+		
+def read_stock_picks(filename='stock_picks.txt'):
+    if not os.path.exists(filename):
+        logger.warning(f"{filename} not found. No manual stock picks will be included.")
+        return []
+    with open(filename, 'r') as f:
+        return [line.strip().upper() for line in f if line.strip()]
 
 async def send_discord_alert(session: aiohttp.ClientSession, message: str):
     payload = {"content": message}
@@ -210,57 +218,6 @@ def calculate_position_size(price: float, atr: float, risk_factor: float) -> flo
     max_shares = (ACCOUNT_BALANCE * MAX_POSITION_SIZE) / price
     return min(np.floor(shares), max_shares)
 
-def daily_stock_screener(stocks: List[str]) -> List[str]:
-    screened_stocks = []
-    logger.info(f"Starting stock screening process for {len(stocks)} stocks.")
-    for ticker in stocks:
-        try:
-            stock = yf.Ticker(ticker)
-            # Use '5d' instead of '1mo' to ensure data availability
-            data = stock.history(period="5d")
-            if len(data) < 5:
-                continue
-            current_price = data['Close'].iloc[-1]
-            sma_5 = data['Close'].rolling(window=5).mean().iloc[-1]
-            volume = data['Volume'].iloc[-1]
-            avg_volume = data['Volume'].mean()
-            daily_return = data['Close'].pct_change().iloc[-1]
-            
-            if (current_price > sma_5 and
-                volume > 1.5 * avg_volume and
-                daily_return > 0.02):
-                screened_stocks.append(ticker)
-                logger.info(f"Added {ticker} to screened stocks. Price: {current_price:.2f}, SMA5: {sma_5:.2f}, Volume: {volume:.0f}, Avg Volume: {avg_volume:.0f}, Daily Return: {daily_return:.2%}")
-            
-            if len(screened_stocks) >= MAX_STOCKS:
-                break
-        except Exception as e:
-            logger.debug(f"Error screening {ticker}: {str(e)}")
-    
-    logger.info(f"Stock screening completed. Selected {len(screened_stocks)} stocks: {', '.join(screened_stocks)}")
-    return screened_stocks[:MAX_STOCKS]
-
-def calculate_trade_performance(buy_price: float, sell_price: float) -> Tuple[float, float]:
-    profit_loss = sell_price - buy_price
-    profit_loss_percentage = (profit_loss / buy_price) * 100
-    return profit_loss, profit_loss_percentage
-
-def check_exit_conditions(data: pd.DataFrame, entry_price: float, position_size: float) -> Tuple[bool, str]:
-    current_price = data['Close'].iloc[-1]
-    atr = data['ATR'].iloc[-1]
-    trailing_stop = entry_price - (2 * atr)
-    if current_price <= trailing_stop:
-        return True, "Trailing Stop Loss"
-    take_profit = entry_price + (3 * atr)
-    if current_price >= take_profit:
-        return True, "Take Profit"
-    days_held = (data.index[-1] - data.index[0]).days
-    if days_held >= 5:
-        return True, "Time-based Exit"
-    return False, ""
-
-# Part 2
-
 def get_sector_performance(tickers):
     sector_performance = {}
     for ticker in tickers:
@@ -301,7 +258,7 @@ def track_performance(trades):
     df['return'] = df['profit_loss_percentage'] / 100
     sharpe = calculate_sharpe_ratio(df['return'])
     max_drawdown = (df['profit_loss'].cumsum().cummin() / ACCOUNT_BALANCE * 100).min()
-    
+
     logger.info(f"Performance Metrics:")
     logger.info(f"Total Trades: {len(trades)}")
     logger.info(f"Win Rate: {(df['profit_loss'] > 0).mean():.2%}")
@@ -309,17 +266,38 @@ def track_performance(trades):
     logger.info(f"Sharpe Ratio: {sharpe:.2f}")
     logger.info(f"Max Drawdown: {max_drawdown:.2%}")
 
+# Part 2
+
 def adjust_strategy(recent_trades):
     win_rate = sum(1 for trade in recent_trades if trade['profit_loss'] > 0) / len(recent_trades)
     avg_return = sum(trade['profit_loss_percentage'] for trade in recent_trades) / len(recent_trades)
-    
+
     global INITIAL_RISK_FACTOR
     if win_rate < 0.4 or avg_return < -0.5:
         INITIAL_RISK_FACTOR *= 0.9  # Reduce risk if performing poorly
     elif win_rate > 0.6 and avg_return > 1:
         INITIAL_RISK_FACTOR *= 1.1  # Increase risk if performing well
-    
+
     INITIAL_RISK_FACTOR = max(min(INITIAL_RISK_FACTOR, 0.02), 0.005)  # Keep within 0.5% to 2% range
+
+def calculate_trade_performance(buy_price: float, sell_price: float) -> Tuple[float, float]:
+    profit_loss = sell_price - buy_price
+    profit_loss_percentage = (profit_loss / buy_price) * 100
+    return profit_loss, profit_loss_percentage
+
+def check_exit_conditions(data: pd.DataFrame, entry_price: float, position_size: float) -> Tuple[bool, str]:
+    current_price = data['Close'].iloc[-1]
+    atr = data['ATR'].iloc[-1]
+    trailing_stop = entry_price - (2 * atr)
+    if current_price <= trailing_stop:
+        return True, "Trailing Stop Loss"
+    take_profit = entry_price + (3 * atr)
+    if current_price >= take_profit:
+        return True, "Take Profit"
+    days_held = (data.index[-1] - data.index[0]).days
+    if days_held >= 5:
+        return True, "Time-based Exit"
+    return False, ""
 
 async def main():
     trades: Dict[str, Dict] = {}
@@ -328,16 +306,20 @@ async def main():
 
     async with aiohttp.ClientSession() as session:
         while True:
-            logger.info("Fetching NASDAQ tickers...")
-            nasdaq_tickers = fetch_nasdaq_tickers()
+            logger.info("Fetching Finviz tickers...")
+            finviz_tickers = fetch_finviz_tickers()
             
-            if not nasdaq_tickers:
-                logger.warning("Failed to fetch NASDAQ tickers. Waiting for next iteration.")
+            if not finviz_tickers:
+                logger.warning("Failed to fetch Finviz tickers. Waiting for next iteration.")
                 await asyncio.sleep(SLEEP_MINUTES * 60)
                 continue
             
-            logger.info("Screening stocks for today's trading...")
-            tickers = daily_stock_screener(nasdaq_tickers)
+            logger.info("Reading manual stock picks...")
+            stock_picks = read_stock_picks()
+            logger.info(f"Manual stock picks: {', '.join(stock_picks)}")
+            
+            # Combine Finviz tickers and stock picks, removing duplicates
+            tickers = list(set(finviz_tickers + stock_picks))
             
             if not tickers:
                 logger.warning("No stocks selected for trading today. Waiting for next iteration.")
@@ -351,10 +333,8 @@ async def main():
             for sector, performance in sector_performance.items():
                 logger.info(f"{sector}: {performance:.2f}%")
 
-            tasks = [get_stock_data(session, ticker, TRADING_INTERVAL, TRADING_PERIOD) for ticker in tickers]
-            stock_data = await asyncio.gather(*tasks)
-
-            for ticker, data in zip(tickers, stock_data):
+            for ticker in tickers:
+                data = await get_stock_data(session, ticker, TRADING_INTERVAL, TRADING_PERIOD)
                 if data.empty:
                     logger.warning(f"No data available for {ticker}")
                     continue
@@ -388,7 +368,7 @@ async def main():
                         logger.info(f"{'PAPER ' if PAPER_TRADING else ''}SELL signal for {ticker} at price {current_price:.2f}")
                         logger.info(f"Trade performance for {ticker}: Profit/Loss = ${total_pl:.2f}, Profit/Loss % = {profit_loss_percentage:.2f}%")
                         logger.info(f"Exit reason: {exit_reason if exit_condition else 'Sell Signal'}")
-                        
+
                         await send_discord_alert(session, f"{'PAPER ' if PAPER_TRADING else ''}SELL signal for {ticker} at price ${current_price:.2f}\n"
                                                  f"Trade performance: Profit/Loss = ${total_pl:.2f}, Profit/Loss % = {profit_loss_percentage:.2f}%\n"
                                                  f"Exit reason: {exit_reason if exit_condition else 'Sell Signal'}")
